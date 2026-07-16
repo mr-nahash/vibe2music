@@ -1,0 +1,8 @@
+// Cloudflare Workers config -- serves ui/ as a static site
+{
+  "name": "vibe2music",
+  "compatibility_date": "2025-06-01",
+  "assets": {
+    "directory": "./ui"
+  }
+}
