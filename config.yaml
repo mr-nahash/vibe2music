@@ -1,0 +1,14 @@
+# vibe2music -- pipeline configuration
+llm:
+  cheap_model: claude-haiku-4-5-20251001   # prompt compiler, metadata (Phase 2)
+music:
+  engine: ace-step          # fallback candidates: stable-audio-open, diffrhythm
+  infer_steps: 60
+  guidance_scale: 15.0
+tracks:
+  per_set: 8
+  duration_sec: {min: 120, max: 240}
+qc:
+  target_lufs: -14
+  lufs_window: [-20, -9]
+  max_silence_sec: 5

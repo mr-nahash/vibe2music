@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vibe2music control panel</title>
+<style>
+  :root { --bg:#12101a; --card:#1d1930; --fg:#e8e4f5; --mut:#8a84a3; --acc:#8b6cf5; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg);
+         max-width:720px; margin-inline:auto; padding:24px 16px; }
+  h1 { font-size:20px; } h2 { font-size:15px; color:var(--mut); margin:24px 0 8px; }
+  .card { background:var(--card); border-radius:10px; padding:16px; margin-bottom:10px; }
+  input, textarea { width:100%; background:#0e0c16; color:var(--fg); border:1px solid #332d4d;
+         border-radius:6px; padding:8px 10px; margin:4px 0 10px; font:inherit; }
+  button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:8px 14px;
+         font:inherit; cursor:pointer; } button.sec { background:#332d4d; }
+  button:disabled { opacity:.4; cursor:default; }
+  .status { font-size:13px; color:var(--mut); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  audio { width:100%; margin-top:8px; }
+  #msg { color:#f5a86c; font-size:13px; min-height:18px; }
+</style>
+</head>
+<body>
+<h1>vibe2music</h1>
+<div id="msg"></div>
+
+<h2>Connection (your GPU box)</h2>
+<div class="card">
+  <input id="apiBase" placeholder="https://xxxxx-8000.proxy.runpod.net">
+  <input id="apiToken" placeholder="API token" type="password">
+  <button onclick="saveConn()">Save</button>
+</div>
+
+<h2>New set</h2>
+<div class="card">
+  <input id="vibe" placeholder='vibe, e.g. "rainy tokyo caf&eacute; at midnight"'>
+  <input id="instruments" placeholder="instruments (comma-separated, optional)">
+  <div class="row">
+    <label>tracks <input id="tracks" type="number" value="8" min="3" max="16" style="width:70px"></label>
+    <button onclick="createJob()">Generate</button>
+  </div>
+</div>
+
+<h2>Jobs</h2>
+<div id="jobs"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const conf = () => ({ base: localStorage.v2mBase || "", token: localStorage.v2mToken || "" });
+$("apiBase").value = conf().base; $("apiToken").value = conf().token;
+
+function saveConn() {
+  localStorage.v2mBase = $("apiBase").value.replace(/\/$/, "");
+  localStorage.v2mToken = $("apiToken").value;
+  msg("saved"); refresh();
+}
+function msg(t) { $("msg").textContent = t; setTimeout(() => $("msg").textContent = "", 4000); }
+
+async function api(path, opts = {}) {
+  const { base, token } = conf();
+  if (!base) throw new Error("set the GPU box URL first");
+  const r = await fetch(base + path, { ...opts,
+    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json",
+               ...(opts.headers || {}) } });
+  if (!r.ok) throw new Error(await r.text());
+  return r;
+}
+
+async function createJob() {
+  try {
+    await api("/jobs", { method: "POST", body: JSON.stringify({
+      vibe: $("vibe").value, instruments: $("instruments").value,
+      tracks: +$("tracks").value }) });
+    msg("job started"); refresh();
+  } catch (e) { msg(e.message); }
+}
+
+async function loadMeta(id, el) {
+  try {
+    const m = await (await api(`/jobs/${id}/metadata`)).json();
+    el.querySelector(".meta").value = JSON.stringify(m, null, 2);
+    el.querySelector(".meta").style.display = "block";
+  } catch (e) { msg(e.message); }
+}
+async function saveMeta(id, el) {
+  try {
+    await api(`/jobs/${id}/metadata`, { method: "PUT", body: el.querySelector(".meta").value });
+    msg("metadata saved");
+  } catch (e) { msg(e.message); }
+}
+async function playAudio(id, el) {
+  try {
+    const blob = await (await api(`/jobs/${id}/audio`)).blob();
+    const a = el.querySelector("audio");
+    a.src = URL.createObjectURL(blob); a.style.display = "block"; a.play();
+  } catch (e) { msg(e.message); }
+}
+async function publish(id) {
+  if (!confirm("Upload to YouTube as PRIVATE?")) return;
+  try { await api(`/jobs/${id}/upload`, { method: "POST" });
+        msg("uploaded (private) - publish from YouTube Studio"); refresh(); }
+  catch (e) { msg(e.message); }
+}
+
+async function refresh() {
+  try {
+    const jobs = await (await api("/jobs")).json();
+    $("jobs").innerHTML = jobs.length ? "" : '<div class="status">no jobs yet</div>';
+    for (const j of jobs) {
+      const el = document.createElement("div"); el.className = "card";
+      const ready = j.status === "ready_for_review";
+      el.innerHTML = `
+        <div class="row"><strong>${j.set_title || j.vibe || j.id}</strong>
+          <span class="status">${j.status || ""}</span></div>
+        <div class="row" style="margin-top:8px">
+          <button class="sec" ${ready ? "" : "disabled"} onclick="playAudio('${j.id}', this.closest('.card'))">Listen</button>
+          <button class="sec" ${ready ? "" : "disabled"} onclick="loadMeta('${j.id}', this.closest('.card'))">Edit metadata</button>
+          <button class="sec" onclick="saveMeta('${j.id}', this.closest('.card'))">Save metadata</button>
+          <button ${ready ? "" : "disabled"} onclick="publish('${j.id}')">Upload (private)</button>
+        </div>
+        <audio controls style="display:none"></audio>
+        <textarea class="meta" rows="10" style="display:none; font-family:monospace"></textarea>`;
+      $("jobs").appendChild(el);
+    }
+  } catch (e) { $("jobs").innerHTML = `<div class="status">${e.message}</div>`; }
+}
+refresh(); setInterval(refresh, 15000);
+</script>
+</body>
+</html>

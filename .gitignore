@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+# secrets -- never commit these
+src/client_secret.json
+src/token.json
+.env
+# pipeline outputs
+output/
+jobs/
+*.wav
+*.mp4

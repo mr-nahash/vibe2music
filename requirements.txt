@@ -1,0 +1,16 @@
+# core pipeline
+anthropic
+librosa
+pyloudnorm
+soundfile
+numpy
+pyyaml
+# server (control panel backend)
+fastapi
+uvicorn
+# youtube upload
+google-api-python-client
+google-auth-oauthlib
+# music generation (GPU box only):
+# torch --index-url https://download.pytorch.org/whl/cu121
+# git+https://github.com/ace-step/ACE-Step.git
