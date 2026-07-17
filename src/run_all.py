@@ -82,7 +82,8 @@ def main() -> None:
     image = args.image
     if image is None:
         image = set_dir / "cover.png"
-        run("cover.py", "--title", plan["set_title"], "--vibe", args.vibe, "--out", str(image))
+        run("cover.py", "--title", plan["set_title"], "--vibe", args.vibe,
+            "--minutes", str(args.target_minutes), "--out", str(image))
     run("render.py", str(set_dir), "--image", str(image))
 
     print(
