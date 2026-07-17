@@ -1,67 +1,115 @@
-"""Metadata generator: set info + chapters -> title/description/tags (cheap LLM).
-
-Drafts only -- a human edits before publish (inauthentic-content policy).
-
-Usage:
-    python metadata.py <set_dir>       # writes <set_dir>/metadata.json
-"""
+"""Draft YouTube metadata, with a deterministic local fallback."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 from pathlib import Path
+from typing import Any
 
-import anthropic
+try:
+    from .common import load_config
+except ImportError:  # direct script execution
+    from common import load_config
 
-CHEAP_MODEL = "claude-haiku-4-5-20251001"
-
-SYSTEM = """You write YouTube metadata for instrumental background-music mixes.
-Return ONLY valid JSON: {"title": str, "description": str, "tags": [str]}
-Rules:
-- Title <= 90 chars, includes the mood + use case (study/sleep/focus/relax), no clickbait.
-- Description: 2 short paragraphs about the mood, then a blank line. Do NOT include
-  chapters (they are appended separately). No hashtags spam -- max 3 at the end.
-- 10-15 tags, lowercase.
-- Never claim human performance. Content is AI-assisted music."""
-
-DISCLOSURE = "\n\nThis music was created with AI assistance and curated by a human."
+DISCLOSURE = "This music was created with AI assistance and curated by a human."
+SYSTEM = """You write accurate YouTube metadata for an instrumental background-music album.
+Return ONLY valid JSON: {"title": str, "description": str, "tags": [str]}.
+Title <= 90 characters, includes mood and use case without clickbait. Description
+has two useful paragraphs, then a concise human-curation and AI-assistance note.
+Use 10-15 lowercase tags. Never claim a human performed the music and never name
+a living artist as a style reference."""
 
 
-def generate_metadata(set_dir: Path) -> dict:
+def _clean_title(value: str) -> str:
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:90].rstrip(" -|")
+
+
+def _fallback_metadata(manifest: dict[str, Any], chapters: str, vibe: str | None) -> dict[str, Any]:
+    set_title = str(manifest.get("set_title", "Instrumental Sessions"))
+    minutes = max(1, round(float(manifest.get("target_duration_sec") or 2700) / 60))
+    tags = [str(tag).lower() for tag in manifest.get("mood_tags", [])]
+    tags += ["instrumental music", "focus music", "study music", "ambient music", "background music"]
+    title = _clean_title(f"{set_title} | {minutes}-Minute Instrumental Focus Mix")
+    description = (
+        f"A continuous instrumental mix built around {vibe or set_title.lower()}. "
+        "The album moves through several related arrangements so it can sit behind "
+        "study, reading, work, or a quiet evening without abrupt changes.\n\n"
+        "The tracks were generated with AI assistance, selected with deterministic "
+        "audio quality checks, crossfaded, and curated for this channel."
+    )
+    return {
+        "title": title,
+        "description": description,
+        "tags": list(dict.fromkeys(tags))[:15],
+    }
+
+
+def generate_metadata(set_dir: Path, vibe: str | None = None,
+                      require_llm: bool = False) -> dict[str, Any]:
     manifest = json.loads((set_dir / "manifest.json").read_text(encoding="utf-8"))
     chapters = (set_dir / "chapters.txt").read_text(encoding="utf-8").strip()
+    cfg = load_config()
+    meta: dict[str, Any]
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key and not os.environ.get("V2M_DISABLE_LLM", "").lower() in {"1", "true", "yes"}:
+        try:
+            import anthropic
 
-    client = anthropic.Anthropic()
-    msg = client.messages.create(
-        model=CHEAP_MODEL, max_tokens=1500, system=SYSTEM,
-        messages=[{"role": "user", "content":
-                   f"Set title: {manifest['set_title']}\n"
-                   f"Mood tags: {', '.join(manifest.get('mood_tags', []))}\n"
-                   f"Track count: {len(manifest['files'])}\n"
-                   f"Track names: {chapters}"}],
-    )
-    raw = msg.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw[raw.find("{"):raw.rfind("}") + 1]
-    meta = json.loads(raw)
-    for field in ("title", "description", "tags"):
-        assert field in meta, f"metadata missing {field}"
+            client = anthropic.Anthropic(api_key=api_key)
+            msg = client.messages.create(
+                model=cfg.get("llm", {}).get("cheap_model", "claude-haiku-4-5-20251001"),
+                max_tokens=1800, system=SYSTEM,
+                messages=[{"role": "user", "content": (
+                    f"Vibe: {vibe or manifest.get('set_title')}\n"
+                    f"Set title: {manifest.get('set_title')}\n"
+                    f"Mood tags: {', '.join(manifest.get('mood_tags', []))}\n"
+                    f"Track count: {len(manifest.get('files', []))}\n"
+                    f"Tracklist/chapter data:\n{chapters}"
+                )}],
+            )
+            raw = msg.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw[raw.find("{"):raw.rfind("}") + 1]
+            meta = json.loads(raw)
+            for field in ("title", "description", "tags"):
+                if field not in meta:
+                    raise ValueError(f"metadata missing {field}")
+        except Exception:
+            if require_llm:
+                raise
+            meta = _fallback_metadata(manifest, chapters, vibe)
+    else:
+        if require_llm:
+            raise RuntimeError("ANTHROPIC_API_KEY is required when --require-llm is set")
+        meta = _fallback_metadata(manifest, chapters, vibe)
 
-    meta["title"] = meta["title"][:100]
-    meta["description"] = meta["description"] + "\n\nTracklist:\n" + chapters + DISCLOSURE
-    meta["tags"] = [t.lower()[:60] for t in meta["tags"]][:15]
+    meta["title"] = _clean_title(str(meta.get("title", manifest.get("set_title", "Instrumental Mix"))))
+    description = str(meta.get("description", "")).strip()
+    if chapters:
+        description += f"\n\nTracklist:\n{chapters}"
+    if DISCLOSURE.lower() not in description.lower():
+        description += f"\n\n{DISCLOSURE}"
+    meta["description"] = description
+    meta["tags"] = [str(tag).lower()[:60] for tag in meta.get("tags", [])][:15]
+    meta["contains_synthetic_media"] = True
+    meta["human_review_required"] = True
     out = set_dir / "metadata.json"
-    out.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    out.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     return meta
 
 
 def main() -> None:
-    p = argparse.ArgumentParser()
-    p.add_argument("set_dir", type=Path)
-    args = p.parse_args()
-    meta = generate_metadata(args.set_dir)
-    print(f"title: {meta['title']}\nwrote {args.set_dir / 'metadata.json'} -- edit before publishing!")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("set_dir", type=Path)
+    parser.add_argument("--vibe", default=None)
+    parser.add_argument("--require-llm", action="store_true")
+    args = parser.parse_args()
+    meta = generate_metadata(args.set_dir, args.vibe, args.require_llm)
+    print(f"title: {meta['title']}\nwrote {args.set_dir / 'metadata.json'} -- review before publishing")
 
 
 if __name__ == "__main__":

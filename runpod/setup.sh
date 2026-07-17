@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# vibe2music -- setup for a fresh RunPod RTX 4090 pod (Ubuntu + CUDA 12.x).
-# Model weights auto-download from HuggingFace on first generation run.
+# Backwards-compatible installer for a RunPod/Vast.ai GPU box.
 set -euo pipefail
 
-apt-get update -qq && apt-get install -y -qq ffmpeg git
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-pip install --upgrade pip
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install "git+https://github.com/ace-step/ACE-Step.git"
-pip install -r "$(dirname "$0")/../requirements.txt"
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update -qq
+  apt-get install -y -qq ffmpeg git python3-venv
+fi
 
-echo "setup complete"
-echo "next: export ANTHROPIC_API_KEY=...; export API_TOKEN=<pick-a-secret>"
-echo "      cd src && uvicorn server:app --host 0.0.0.0 --port 8000"
+bash "${ROOT}/setup_local.sh"
+
+echo
+echo "GPU worker ready. Start it with:"
+echo "  API_TOKEN=<long-secret> ${ROOT}/run_local.sh"
+echo "Then expose port 8000 through the provider's HTTPS proxy or a secure tunnel."

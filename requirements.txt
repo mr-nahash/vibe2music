@@ -1,16 +1,21 @@
-# core pipeline
+# Core pipeline
 anthropic
 librosa
 pyloudnorm
 soundfile
 numpy
 pyyaml
-# server (control panel backend)
+Pillow
+
+# Web control panel backend
 fastapi
-uvicorn
-# youtube upload
+uvicorn[standard]
+python-multipart
+
+# YouTube upload
 google-api-python-client
 google-auth-oauthlib
-# music generation (GPU box only):
-# torch --index-url https://download.pytorch.org/whl/cu121
-# git+https://github.com/ace-step/ACE-Step.git
+
+# Install the CUDA-enabled torch wheel and ACE-Step separately with
+# setup_local.sh or runpod/setup.sh. Keeping them out of this file avoids
+# silently installing a CPU-only build on a GPU machine.

@@ -1,14 +1,36 @@
-# vibe2music -- pipeline configuration
+# vibe2music production defaults. Environment variables and CLI flags override
+# these values where a component exposes an override.
 llm:
-  cheap_model: claude-haiku-4-5-20251001   # prompt compiler, metadata (Phase 2)
+  cheap_model: claude-haiku-4-5-20251001
+  fallback_without_api: true
 music:
-  engine: ace-step          # fallback candidates: stable-audio-open, diffrhythm
+  engine: ace-step
+  checkpoint_path: ""
+  device: auto
+  device_id: 0
+  bf16: true
+  cpu_offload: false
+  overlapped_decode: false
+  torch_compile: false
   infer_steps: 60
   guidance_scale: 15.0
+  scheduler_type: euler
+  cfg_type: apg
+  omega_scale: 10.0
 tracks:
-  per_set: 8
-  duration_sec: {min: 120, max: 240}
+  target_minutes: 45
+  per_set: null              # null = calculate enough tracks for the target
+  duration_sec: {min: 180, max: 240}
+  crossfade_sec: 4
 qc:
   target_lufs: -14
   lufs_window: [-20, -9]
   max_silence_sec: 5
+render:
+  width: 1920
+  height: 1080
+  fps: 2
+  audio_bitrate: 192k
+upload:
+  default_privacy: private
+  allow_public: false

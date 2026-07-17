@@ -1,132 +1,239 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>vibe2music control panel</title>
-<style>
-  :root { --bg:#12101a; --card:#1d1930; --fg:#e8e4f5; --mut:#8a84a3; --acc:#8b6cf5; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg);
-         max-width:720px; margin-inline:auto; padding:24px 16px; }
-  h1 { font-size:20px; } h2 { font-size:15px; color:var(--mut); margin:24px 0 8px; }
-  .card { background:var(--card); border-radius:10px; padding:16px; margin-bottom:10px; }
-  input, textarea { width:100%; background:#0e0c16; color:var(--fg); border:1px solid #332d4d;
-         border-radius:6px; padding:8px 10px; margin:4px 0 10px; font:inherit; }
-  button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:8px 14px;
-         font:inherit; cursor:pointer; } button.sec { background:#332d4d; }
-  button:disabled { opacity:.4; cursor:default; }
-  .status { font-size:13px; color:var(--mut); }
-  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  audio { width:100%; margin-top:8px; }
-  #msg { color:#f5a86c; font-size:13px; min-height:18px; }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vibe2music studio</title>
+  <style>
+    :root {
+      --bg: #0d0d12; --panel: #171722; --panel2: #202032; --line: #35354e;
+      --ink: #f4f1eb; --muted: #a4a1b7; --accent: #c8a5ff; --accent2: #83e0cb;
+      --warn: #f4bd77; --danger: #ff8e9e; --shadow: 0 18px 50px #0005;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: var(--ink); background:
+      radial-gradient(circle at 10% 0%, #2b2140 0, transparent 35rem), var(--bg);
+      font: 15px/1.5 Inter, ui-sans-serif, system-ui, sans-serif; }
+    main { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 34px 0 70px; }
+    header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:28px; }
+    h1 { margin:0; font-size: clamp(28px, 5vw, 48px); letter-spacing:-.04em; }
+    h2 { margin: 0 0 12px; font-size: 15px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+    p { margin: 6px 0; color:var(--muted); }
+    .eyebrow { color:var(--accent2); font-size:12px; letter-spacing:.16em; text-transform:uppercase; }
+    .pill { border:1px solid var(--line); border-radius:999px; color:var(--muted); padding:6px 10px; font-size:12px; white-space:nowrap; }
+    .grid { display:grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap:16px; }
+    .panel { background:linear-gradient(145deg, #1b1b29, #14141e); border:1px solid #ffffff0d;
+      border-radius:18px; padding:20px; box-shadow:var(--shadow); }
+    .wide { grid-column:1/-1; }
+    label { display:block; color:var(--muted); font-size:13px; margin:10px 0 5px; }
+    input, textarea, select { width:100%; border:1px solid var(--line); border-radius:10px;
+      padding:10px 12px; background:#0e0e16; color:var(--ink); font:inherit; outline:none; }
+    input:focus, textarea:focus, select:focus { border-color:var(--accent); box-shadow:0 0 0 3px #c8a5ff1b; }
+    textarea { min-height:92px; resize:vertical; }
+    .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .split { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+    button { border:0; border-radius:10px; padding:10px 14px; background:var(--accent);
+      color:#17131d; font:600 14px inherit; cursor:pointer; transition:transform .15s, opacity .15s; }
+    button:hover { transform:translateY(-1px); } button:disabled { opacity:.4; cursor:not-allowed; transform:none; }
+    button.secondary { background:var(--panel2); color:var(--ink); border:1px solid var(--line); }
+    button.danger { color:#210f15; background:var(--danger); }
+    .status { color:var(--muted); font-size:13px; min-height:20px; }
+    .status.ok { color:var(--accent2); }
+    .status.error { color:var(--danger); font-weight:600; }
+    .status.pending { color:var(--warn); }
+    #message { flex:1; }
+    .notice { border-left:3px solid var(--warn); padding:8px 12px; color:#e6d4b9; background:#f4bd7710;
+      border-radius:6px; font-size:13px; margin-top:12px; }
+    #jobs { display:grid; gap:12px; }
+    .job { border:1px solid var(--line); border-radius:14px; padding:16px; background:#11111a; }
+    .job-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; }
+    .job-title { font-size:18px; font-weight:650; }
+    .job-sub { color:var(--muted); font-size:13px; margin-top:3px; }
+    .state { border-radius:999px; padding:4px 9px; font-size:12px; color:var(--accent2); background:#83e0cb14; white-space:nowrap; }
+    .state.failed, .state.cancelled { color:var(--danger); background:#ff8e9e14; }
+    .progress { height:7px; background:#2a2a3a; border-radius:999px; overflow:hidden; margin:14px 0 8px; }
+    .progress > i { display:block; height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--accent2)); border-radius:inherit; transition:width .3s; }
+    audio, video { display:block; width:100%; margin-top:12px; border-radius:10px; background:#000; }
+    video { max-height:400px; }
+    .actions { display:flex; gap:7px; flex-wrap:wrap; margin-top:12px; }
+    .actions button { padding:8px 10px; font-size:13px; }
+    .meta, .log { display:none; margin-top:12px; min-height:180px; font:12px/1.45 ui-monospace, monospace; }
+    .empty { padding:26px; text-align:center; border:1px dashed var(--line); border-radius:14px; color:var(--muted); }
+    .small { font-size:12px; color:var(--muted); }
+    @media (max-width: 760px) { .grid { grid-template-columns:1fr; } .wide { grid-column:auto; }
+      header { display:block; } .pill { display:inline-block; margin-top:12px; } .split { grid-template-columns:1fr; } }
+  </style>
 </head>
 <body>
-<h1>vibe2music</h1>
-<div id="msg"></div>
+<main>
+  <header>
+    <div><div class="eyebrow">local GPU production studio</div><h1>vibe2music</h1>
+      <p>Turn one idea into a curated, exact-length instrumental video.</p></div>
+    <div class="pill">45-minute album workflow</div>
+  </header>
 
-<h2>Connection (your GPU box)</h2>
-<div class="card">
-  <input id="apiBase" placeholder="https://xxxxx-8000.proxy.runpod.net">
-  <input id="apiToken" placeholder="API token" type="password">
-  <button onclick="saveConn()">Save</button>
-</div>
+  <div class="grid">
+    <section class="panel">
+      <h2>Connect to the worker</h2>
+      <label for="apiBase">GPU worker URL</label>
+      <input id="apiBase" placeholder="http://127.0.0.1:8000 or your HTTPS tunnel">
+      <label for="apiToken">API token</label>
+      <input id="apiToken" type="password" placeholder="the token printed by run_local.sh">
+      <div class="row" style="margin-top:10px">
+        <button onclick="saveConnection()">Save connection</button>
+        <button class="secondary" onclick="checkHealth()">Check GPU</button>
+      </div>
+      <div id="health" class="status" style="margin-top:10px"></div>
+      <div id="connectionHint" class="notice">Start the GPU worker on the computer with the NVIDIA GPU, then enter its URL and API token here before starting a production.</div>
+      <div class="small">For a deployed HTTPS panel, expose the local API through an HTTPS tunnel. Never put an unprotected API on the public internet.</div>
+    </section>
 
-<h2>New set</h2>
-<div class="card">
-  <input id="vibe" placeholder='vibe, e.g. "rainy tokyo caf&eacute; at midnight"'>
-  <input id="instruments" placeholder="instruments (comma-separated, optional)">
-  <div class="row">
-    <label>tracks <input id="tracks" type="number" value="8" min="3" max="16" style="width:70px"></label>
-    <button onclick="createJob()">Generate</button>
+    <section class="panel">
+      <h2>New production job</h2>
+      <label for="vibe">Vibe / creative brief</label>
+      <textarea id="vibe" placeholder="rainy Tokyo café at midnight, warm analog synths, focused and spacious"></textarea>
+      <label for="instruments">Instruments or textures</label>
+      <input id="instruments" placeholder="felt piano, tape hiss, brushed drums">
+      <div class="split">
+        <div><label for="targetMinutes">Target minutes</label><input id="targetMinutes" type="number" value="45" min="1" max="180" step="1"></div>
+        <div><label for="tracks">Tracks <span class="small">(blank = automatic)</span></label><input id="tracks" type="number" placeholder="automatic" min="3" max="24"></div>
+      </div>
+      <div class="split">
+        <div><label for="device">Generation device</label><select id="device"><option value="auto">Auto (NVIDIA → MPS → CPU)</option><option value="cuda">NVIDIA CUDA</option><option value="mps">Apple MPS</option><option value="cpu">CPU (very slow)</option></select></div>
+        <div><label for="deviceId">NVIDIA device ID</label><input id="deviceId" type="number" value="0" min="0" max="15"></div>
+      </div>
+      <label for="image">Optional cover image</label><input id="image" type="file" accept=".jpg,.jpeg,.png,.webp,image/*">
+      <div class="row" style="margin-top:12px"><button id="startProduction" onclick="createJob()">Start production</button><div id="message" class="status" role="status" aria-live="polite"></div></div>
+    </section>
+
+    <section class="panel wide">
+      <div class="row" style="justify-content:space-between"><h2 style="margin:0">Production queue</h2><button class="secondary" onclick="refreshJobs()">Refresh</button></div>
+      <div class="notice">Every job is assembled and uploaded privately by default. Listen to the complete render, edit the metadata, and make the final publishing decision yourself.</div>
+      <div id="jobs" style="margin-top:14px"><div class="empty">Connect to the worker to see jobs.</div></div>
+    </section>
   </div>
-</div>
-
-<h2>Jobs</h2>
-<div id="jobs"></div>
+</main>
 
 <script>
 const $ = id => document.getElementById(id);
-const conf = () => ({ base: localStorage.v2mBase || "", token: localStorage.v2mToken || "" });
-$("apiBase").value = conf().base; $("apiToken").value = conf().token;
-
-function saveConn() {
-  localStorage.v2mBase = $("apiBase").value.replace(/\/$/, "");
-  localStorage.v2mToken = $("apiToken").value;
-  msg("saved"); refresh();
+const config = () => ({base: localStorage.v2mBase || "", token: localStorage.v2mToken || ""});
+const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, Number(n) || 0));
+const noticeTimers = {};
+function setStatus(target, text, tone = "") {
+  const el = $(target); if (!el) return;
+  el.textContent = text; el.className = `status${tone ? ` ${tone}` : ""}`;
 }
-function msg(t) { $("msg").textContent = t; setTimeout(() => $("msg").textContent = "", 4000); }
-
-async function api(path, opts = {}) {
-  const { base, token } = conf();
-  if (!base) throw new Error("set the GPU box URL first");
-  const r = await fetch(base + path, { ...opts,
-    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json",
-               ...(opts.headers || {}) } });
-  if (!r.ok) throw new Error(await r.text());
-  return r;
+function notice(text, target = "message", tone = "error", persist = false) {
+  setStatus(target, text, tone); clearTimeout(noticeTimers[target]);
+  if (!persist) noticeTimers[target] = setTimeout(() => setStatus(target, ""), 8000);
+}
+function formConnection() {
+  return {base: $("apiBase").value.trim().replace(/\/$/, ""), token: $("apiToken").value.trim()};
+}
+function updateConnectionHint() {
+  const {base, token} = formConnection();
+  if (base && token) {
+    $("connectionHint").textContent = "Connection details entered. Click Check GPU to verify NVIDIA/CUDA before starting.";
+    $("connectionHint").style.borderLeftColor = "var(--accent2)";
+  } else {
+    $("connectionHint").textContent = "Start the GPU worker on the computer with the NVIDIA GPU, then enter its URL and API token here before starting a production.";
+    $("connectionHint").style.borderLeftColor = "var(--warn)";
+  }
+}
+function init() {
+  $("apiBase").value = config().base; $("apiToken").value = config().token; updateConnectionHint();
+  if (config().base && config().token) { checkHealth(); refreshJobs(); }
+}
+function saveConnection() {
+  const {base, token} = formConnection();
+  if (!base || !token) {
+    notice("Enter both the GPU worker URL and the API token first.", "health", "error", true);
+    updateConnectionHint(); return;
+  }
+  localStorage.v2mBase = base; localStorage.v2mToken = token; updateConnectionHint();
+  notice("Connection saved. Checking GPU…", "message", "pending", true); checkHealth(); refreshJobs();
 }
 
+async function api(path, options = {}) {
+  const {base, token} = config();
+  if (!base || !token) throw new Error("Connect the GPU worker first: enter its URL and API token, then click Save connection.");
+  const headers = {"Authorization": "Bearer " + token, ...(options.headers || {})};
+  if (!(options.body instanceof FormData) && options.body !== undefined) headers["Content-Type"] = "application/json";
+  let response;
+  try { response = await fetch(base + path, {...options, headers}); }
+  catch (e) { throw new Error(`Cannot reach the GPU worker at ${base}. Start run_local.sh and use an HTTPS tunnel when this page is HTTPS.`); }
+  if (response.status === 401 || response.status === 403) throw new Error("The GPU worker rejected the API token. Copy the token printed by run_local.sh and save the connection again.");
+  if (!response.ok) throw new Error((await response.text()) || `${response.status} ${response.statusText}`);
+  return response;
+}
+async function checkHealth() {
+  setStatus("health", "Checking GPU worker…", "pending");
+  try { const data = await (await api("/health")).json(); const h = data.hardware || {};
+    setStatus("health", h.cuda ? `Ready · ${h.device} · ${h.vram_gb || "?"} GB VRAM` : `Worker online · accelerator not detected (${h.device || "unknown"})`, h.cuda ? "ok" : "pending");
+  } catch (e) { setStatus("health", e.message, "error"); }
+}
 async function createJob() {
+  const button = $("startProduction");
+  if (!config().base || !config().token) {
+    notice("Connect the GPU worker first: enter its URL and API token in the left panel, then click Save connection.", "message", "error", true);
+    setStatus("health", "GPU worker is not connected.", "error"); updateConnectionHint(); return;
+  }
   try {
-    await api("/jobs", { method: "POST", body: JSON.stringify({
-      vibe: $("vibe").value, instruments: $("instruments").value,
-      tracks: +$("tracks").value }) });
-    msg("job started"); refresh();
-  } catch (e) { msg(e.message); }
+    const vibe = $("vibe").value.trim(); if (!vibe) throw new Error("describe the vibe first");
+    button.disabled = true; button.textContent = "Queueing…"; notice("Submitting production to the GPU worker…", "message", "pending", true);
+    const form = new FormData();
+    form.append("vibe", vibe); form.append("instruments", $("instruments").value.trim());
+    form.append("target_minutes", $("targetMinutes").value); form.append("device", $("device").value);
+    form.append("device_id", $("deviceId").value);
+    if ($("tracks").value) form.append("tracks", $("tracks").value);
+    if ($("image").files[0]) form.append("image", $("image").files[0]);
+    await api("/jobs", {method:"POST", body:form});
+    notice("Production queued. Watch its progress in the queue below.", "message", "ok", true); $("vibe").value = ""; $("image").value = ""; refreshJobs();
+  } catch (e) { notice(e.message, "message", "error", true); }
+  finally { button.disabled = false; button.textContent = "Start production"; }
 }
-
-async function loadMeta(id, el) {
-  try {
-    const m = await (await api(`/jobs/${id}/metadata`)).json();
-    el.querySelector(".meta").value = JSON.stringify(m, null, 2);
-    el.querySelector(".meta").style.display = "block";
-  } catch (e) { msg(e.message); }
+async function loadBlob(path) { return URL.createObjectURL(await (await api(path)).blob()); }
+async function listen(id, el) { try { const audio = el.querySelector("audio"); audio.src = await loadBlob(`/jobs/${id}/audio`); audio.style.display = "block"; await audio.play(); } catch(e) { notice(e.message); } }
+async function watch(id, el) { try { const video = el.querySelector("video"); video.src = await loadBlob(`/jobs/${id}/video`); video.style.display = "block"; video.controls = true; await video.play(); } catch(e) { notice(e.message); } }
+async function downloadFile(id, kind, filename) { try { const url = await loadBlob(`/jobs/${id}/download/${kind}`); const a = document.createElement("a"); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 2000); } catch(e) { notice(e.message); } }
+async function loadMeta(id, el) { try { el.querySelector(".meta").value = JSON.stringify(await (await api(`/jobs/${id}/metadata`)).json(), null, 2); el.querySelector(".meta").style.display = "block"; } catch(e) { notice(e.message); } }
+async function saveMeta(id, el) { try { const value = JSON.parse(el.querySelector(".meta").value); await api(`/jobs/${id}/metadata`, {method:"PUT", body:JSON.stringify(value)}); notice("metadata saved"); } catch(e) { notice(e.message); } }
+async function showLog(id, el) { try { el.querySelector(".log").value = (await (await api(`/jobs/${id}/log`)).json()).log; el.querySelector(".log").style.display = "block"; } catch(e) { notice(e.message); } }
+async function cancelJob(id) { if (!confirm("Cancel this production?")) return; try { await api(`/jobs/${id}/cancel`, {method:"POST"}); refreshJobs(); } catch(e) { notice(e.message); } }
+async function retryJob(id) { try { await api(`/jobs/${id}/retry`, {method:"POST"}); refreshJobs(); } catch(e) { notice(e.message); } }
+async function uploadPrivate(id) { if (!confirm("Upload this reviewed video to YouTube as PRIVATE?")) return; try { await api(`/jobs/${id}/upload`, {method:"POST", body:JSON.stringify({privacy:"private"})}); notice("uploaded privately"); refreshJobs(); } catch(e) { notice(e.message); } }
+function renderJob(j) {
+  const status = String(j.status || "unknown"); const ready = status === "ready_for_review"; const terminal = ["failed","cancelled"].includes(status) || status.startsWith("uploaded_");
+  const title = esc(j.set_title || j.vibe || j.id); const sub = `${esc(j.target_minutes || 45)} min · ${esc(j.tracks || "auto")} tracks · ${esc(status.replaceAll("_"," "))}`;
+  const card = document.createElement("div"); card.className = "job";
+  card.innerHTML = `<div class="job-head"><div><div class="job-title">${title}</div><div class="job-sub">${sub}</div></div><div class="state ${status.startsWith("failed") || status === "cancelled" ? "failed" : ""}">${esc(status.replaceAll("_"," "))}</div></div>
+    <div class="progress"><i style="width:${clamp(j.progress,0,100)}%"></i></div><div class="status">${esc(j.current_step || j.error || (ready ? "Ready for review" : "Waiting"))}</div>
+    <div class="actions">
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="listen('${j.id}',this.closest('.job'))">Listen</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="watch('${j.id}',this.closest('.job'))">Preview video</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="loadMeta('${j.id}',this.closest('.job'))">Edit metadata</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="saveMeta('${j.id}',this.closest('.job'))">Save metadata</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="downloadFile('${j.id}','video','vibe2music-${j.id}.mp4')">Download MP4</button>
+      <button class="secondary" onclick="showLog('${j.id}',this.closest('.job'))">Log</button>
+      <button ${ready ? "" : "disabled"} onclick="uploadPrivate('${j.id}')">Upload private</button>
+      <button class="danger" ${terminal ? "disabled" : ""} onclick="cancelJob('${j.id}')">Cancel</button>
+      <button class="secondary" ${status === "failed" || status === "cancelled" ? "" : "disabled"} onclick="retryJob('${j.id}')">Retry</button>
+    </div><audio controls style="display:none"></audio><video style="display:none"></video>
+    <textarea class="meta" spellcheck="false"></textarea><textarea class="log" readonly spellcheck="false"></textarea>`;
+  return card;
 }
-async function saveMeta(id, el) {
-  try {
-    await api(`/jobs/${id}/metadata`, { method: "PUT", body: el.querySelector(".meta").value });
-    msg("metadata saved");
-  } catch (e) { msg(e.message); }
+async function refreshJobs() {
+  if ([...document.querySelectorAll("audio,video")].some(media => !media.paused && !media.ended)) return;
+  if (document.activeElement && document.activeElement.classList.contains("meta")) return;
+  if (!config().base || !config().token) { $("jobs").innerHTML = '<div class="empty">Enter the GPU worker URL and API token above, then click Save connection.</div>'; return; }
+  try { const jobs = await (await api("/jobs")).json(); $("jobs").innerHTML = "";
+    if (!jobs.length) { $("jobs").innerHTML = '<div class="empty">No productions yet. Start with a vibe.</div>'; return; }
+    jobs.forEach(j => $("jobs").appendChild(renderJob(j)));
+  } catch(e) { $("jobs").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
-async function playAudio(id, el) {
-  try {
-    const blob = await (await api(`/jobs/${id}/audio`)).blob();
-    const a = el.querySelector("audio");
-    a.src = URL.createObjectURL(blob); a.style.display = "block"; a.play();
-  } catch (e) { msg(e.message); }
-}
-async function publish(id) {
-  if (!confirm("Upload to YouTube as PRIVATE?")) return;
-  try { await api(`/jobs/${id}/upload`, { method: "POST" });
-        msg("uploaded (private) - publish from YouTube Studio"); refresh(); }
-  catch (e) { msg(e.message); }
-}
-
-async function refresh() {
-  try {
-    const jobs = await (await api("/jobs")).json();
-    $("jobs").innerHTML = jobs.length ? "" : '<div class="status">no jobs yet</div>';
-    for (const j of jobs) {
-      const el = document.createElement("div"); el.className = "card";
-      const ready = j.status === "ready_for_review";
-      el.innerHTML = `
-        <div class="row"><strong>${j.set_title || j.vibe || j.id}</strong>
-          <span class="status">${j.status || ""}</span></div>
-        <div class="row" style="margin-top:8px">
-          <button class="sec" ${ready ? "" : "disabled"} onclick="playAudio('${j.id}', this.closest('.card'))">Listen</button>
-          <button class="sec" ${ready ? "" : "disabled"} onclick="loadMeta('${j.id}', this.closest('.card'))">Edit metadata</button>
-          <button class="sec" onclick="saveMeta('${j.id}', this.closest('.card'))">Save metadata</button>
-          <button ${ready ? "" : "disabled"} onclick="publish('${j.id}')">Upload (private)</button>
-        </div>
-        <audio controls style="display:none"></audio>
-        <textarea class="meta" rows="10" style="display:none; font-family:monospace"></textarea>`;
-      $("jobs").appendChild(el);
-    }
-  } catch (e) { $("jobs").innerHTML = `<div class="status">${e.message}</div>`; }
-}
-refresh(); setInterval(refresh, 15000);
+["apiBase", "apiToken"].forEach(id => $(id).addEventListener("input", updateConnectionHint));
+init(); setInterval(refreshJobs, 6000);
 </script>
 </body>
 </html>
