@@ -1,69 +1,100 @@
-"""One-command pipeline: vibe -> published-ready set.
-
-    python run_all.py "rainy tokyo cafe" --instruments piano,vinyl \
-        --image cover.jpg [--tracks 8] [--upload] [--dry-run]
-
-Steps: compile prompts -> generate (GPU) -> QC gate -> mix -> render -> metadata
-       -> [optional] upload (private).
---dry-run stops after printing the generation plan (no GPU, no API cost).
-"""
+"""Run the complete production pipeline from vibe to reviewable MP4."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).parent
+from common import slugify
+
+HERE = Path(__file__).resolve().parent
 
 
-def run(script: str, *args: str) -> None:
-    cmd = [sys.executable, str(HERE / script), *args]
+def run(script: str, *args: str, env: dict[str, str] | None = None) -> None:
+    command = [sys.executable, str(HERE / script), *args]
     print(f"\n=== {script} {' '.join(args)} ===")
-    if subprocess.run(cmd).returncode != 0:
-        print(f"pipeline stopped at {script}", file=sys.stderr)
-        sys.exit(1)
+    completed = subprocess.run(command, env=env)
+    if completed.returncode != 0:
+        raise SystemExit(f"pipeline stopped at {script} (exit {completed.returncode})")
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="vibe -> YouTube-ready video, one command")
-    p.add_argument("vibe")
-    p.add_argument("--instruments", default="")
-    p.add_argument("--image", required=True, help="cover image for the video")
-    p.add_argument("--tracks", type=int, default=8)
-    p.add_argument("--out", default="output")
-    p.add_argument("--upload", action="store_true", help="also upload (private) at the end")
-    p.add_argument("--dry-run", action="store_true")
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description="vibe -> exact-length YouTube-ready video")
+    parser.add_argument("vibe")
+    parser.add_argument("--instruments", default="")
+    parser.add_argument("--image", type=Path, default=None)
+    parser.add_argument("--tracks", type=int, default=None)
+    parser.add_argument("--target-minutes", type=float, default=45.0)
+    parser.add_argument("--out", default="output")
+    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
+    parser.add_argument("--device-id", type=int, default=0)
+    parser.add_argument("--checkpoint-path", default="")
+    parser.add_argument("--allow-cpu", action="store_true")
+    parser.add_argument("--upload", action="store_true", help="upload as private after the pipeline")
+    parser.add_argument("--privacy", default="private", choices=["private", "unlisted", "public"])
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--require-llm", action="store_true")
+    args = parser.parse_args()
 
-    prompts = Path(args.out) / "prompts.json"
-    prompts.parent.mkdir(parents=True, exist_ok=True)
-    run("prompt_compiler.py", args.vibe, "--instruments", args.instruments,
-        "--tracks", str(args.tracks), "--out", str(prompts))
+    out_root = Path(args.out)
+    out_root.mkdir(parents=True, exist_ok=True)
+    prompts = out_root / "prompts.json"
+    compile_args = [
+        args.vibe, "--instruments", args.instruments,
+        "--target-minutes", str(args.target_minutes), "--out", str(prompts),
+    ]
+    if args.tracks is not None:
+        compile_args += ["--tracks", str(args.tracks)]
+    if args.image:
+        compile_args += ["--image", str(args.image)]
+    if args.require_llm:
+        compile_args.append("--require-llm")
+    if args.dry_run:
+        compile_args.append("--offline")
+    run("prompt_compiler.py", *compile_args)
 
     if args.dry_run:
-        run("generate.py", str(prompts), "--out", args.out, "--dry-run")
-        print("\ndry run complete -- no GPU or upload cost incurred")
+        run("generate.py", str(prompts), "--out", str(out_root), "--dry-run")
+        print("\ndry run complete -- no GPU or LLM request was made")
         return
 
-    run("generate.py", str(prompts), "--out", args.out)
+    generate_args = [
+        str(prompts), "--out", str(out_root), "--device", args.device,
+        "--device-id", str(args.device_id),
+    ]
+    if args.checkpoint_path:
+        generate_args += ["--checkpoint-path", args.checkpoint_path]
+    if args.allow_cpu:
+        generate_args.append("--allow-cpu")
+    run("generate.py", *generate_args)
 
     plan = json.loads(prompts.read_text(encoding="utf-8"))
-    import re
-    set_dir = Path(args.out) / re.sub(r"[^a-z0-9]+", "-", plan["set_title"].lower()).strip("-")[:60]
+    set_dir = out_root / slugify(plan["set_title"])
+    run("qc.py", str(set_dir), "--min-passed", "1")
+    run("mix.py", str(set_dir), "--target-minutes", str(args.target_minutes))
+    run("metadata.py", str(set_dir), "--vibe", args.vibe)
 
-    run("qc.py", str(set_dir))
-    run("mix.py", str(set_dir))
-    run("render.py", str(set_dir), "--image", args.image)
-    run("metadata.py", str(set_dir))
+    image = args.image
+    if image is None:
+        image = set_dir / "cover.png"
+        run("cover.py", "--title", plan["set_title"], "--vibe", args.vibe, "--out", str(image))
+    run("render.py", str(set_dir), "--image", str(image))
 
-    print(f"\nREVIEW CHECKPOINT: listen to {set_dir / 'mix.wav'} and edit "
-          f"{set_dir / 'metadata.json'} before publishing.")
+    print(
+        f"\nREADY FOR REVIEW\n"
+        f"  audio: {set_dir / 'mix.wav'}\n"
+        f"  video: {set_dir / 'video.mp4'}\n"
+        f"  metadata: {set_dir / 'metadata.json'}\n"
+        "Review the complete video and metadata before any public release."
+    )
     if args.upload:
-        run("upload.py", str(set_dir), "--privacy", "private")
-        print("uploaded as PRIVATE -- publish from YouTube Studio after review.")
+        run("upload.py", str(set_dir), "--privacy", args.privacy)
+        print(f"uploaded to YouTube as {args.privacy}")
 
 
 if __name__ == "__main__":
