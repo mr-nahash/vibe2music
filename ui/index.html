@@ -124,12 +124,12 @@ async function api(path, options = {}) {
   const headers = {"Authorization": "Bearer " + token, ...(options.headers || {})};
   if (!(options.body instanceof FormData) && options.body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(base + path, {...options, headers});
-  if (!response.ok) throw new Error((await response.text()) || `\${response.status} \${response.statusText}`);
+  if (!response.ok) throw new Error((await response.text()) || `${response.status} ${response.statusText}`);
   return response;
 }
 async function checkHealth() {
   try { const data = await (await api("/health")).json(); const h = data.hardware || {};
-    $("health").textContent = h.cuda ? `Ready · \${h.device} · \${h.vram_gb || "?"} GB VRAM` : `Worker online · accelerator not detected (\${h.device || "unknown"})`;
+    $("health").textContent = h.cuda ? `Ready · ${h.device} · ${h.vram_gb || "?"} GB VRAM` : `Worker online · accelerator not detected (${h.device || "unknown"})`;
   } catch (e) { $("health").textContent = e.message; }
 }
 async function createJob() {
@@ -146,31 +146,31 @@ async function createJob() {
   } catch (e) { notice(e.message); }
 }
 async function loadBlob(path) { return URL.createObjectURL(await (await api(path)).blob()); }
-async function listen(id, el) { try { const audio = el.querySelector("audio"); audio.src = await loadBlob(`/jobs/\${id}/audio`); audio.style.display = "block"; await audio.play(); } catch(e) { notice(e.message); } }
-async function watch(id, el) { try { const video = el.querySelector("video"); video.src = await loadBlob(`/jobs/\${id}/video`); video.style.display = "block"; video.controls = true; await video.play(); } catch(e) { notice(e.message); } }
-async function downloadFile(id, kind, filename) { try { const url = await loadBlob(`/jobs/\${id}/download/\${kind}`); const a = document.createElement("a"); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 2000); } catch(e) { notice(e.message); } }
-async function loadMeta(id, el) { try { el.querySelector(".meta").value = JSON.stringify(await (await api(`/jobs/\${id}/metadata`)).json(), null, 2); el.querySelector(".meta").style.display = "block"; } catch(e) { notice(e.message); } }
-async function saveMeta(id, el) { try { const value = JSON.parse(el.querySelector(".meta").value); await api(`/jobs/\${id}/metadata`, {method:"PUT", body:JSON.stringify(value)}); notice("metadata saved"); } catch(e) { notice(e.message); } }
-async function showLog(id, el) { try { el.querySelector(".log").value = (await (await api(`/jobs/\${id}/log`)).json()).log; el.querySelector(".log").style.display = "block"; } catch(e) { notice(e.message); } }
-async function cancelJob(id) { if (!confirm("Cancel this production?")) return; try { await api(`/jobs/\${id}/cancel`, {method:"POST"}); refreshJobs(); } catch(e) { notice(e.message); } }
-async function retryJob(id) { try { await api(`/jobs/\${id}/retry`, {method:"POST"}); refreshJobs(); } catch(e) { notice(e.message); } }
-async function uploadPrivate(id) { if (!confirm("Upload this reviewed video to YouTube as PRIVATE?")) return; try { await api(`/jobs/\${id}/upload`, {method:"POST", body:JSON.stringify({privacy:"private"})}); notice("uploaded privately"); refreshJobs(); } catch(e) { notice(e.message); } }
+async function listen(id, el) { try { const audio = el.querySelector("audio"); audio.src = await loadBlob(`/jobs/${id}/audio`); audio.style.display = "block"; await audio.play(); } catch(e) { notice(e.message); } }
+async function watch(id, el) { try { const video = el.querySelector("video"); video.src = await loadBlob(`/jobs/${id}/video`); video.style.display = "block"; video.controls = true; await video.play(); } catch(e) { notice(e.message); } }
+async function downloadFile(id, kind, filename) { try { const url = await loadBlob(`/jobs/${id}/download/${kind}`); const a = document.createElement("a"); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 2000); } catch(e) { notice(e.message); } }
+async function loadMeta(id, el) { try { el.querySelector(".meta").value = JSON.stringify(await (await api(`/jobs/${id}/metadata`)).json(), null, 2); el.querySelector(".meta").style.display = "block"; } catch(e) { notice(e.message); } }
+async function saveMeta(id, el) { try { const value = JSON.parse(el.querySelector(".meta").value); await api(`/jobs/${id}/metadata`, {method:"PUT", body:JSON.stringify(value)}); notice("metadata saved"); } catch(e) { notice(e.message); } }
+async function showLog(id, el) { try { el.querySelector(".log").value = (await (await api(`/jobs/${id}/log`)).json()).log; el.querySelector(".log").style.display = "block"; } catch(e) { notice(e.message); } }
+async function cancelJob(id) { if (!confirm("Cancel this production?")) return; try { await api(`/jobs/${id}/cancel`, {method:"POST"}); refreshJobs(); } catch(e) { notice(e.message); } }
+async function retryJob(id) { try { await api(`/jobs/${id}/retry`, {method:"POST"}); refreshJobs(); } catch(e) { notice(e.message); } }
+async function uploadPrivate(id) { if (!confirm("Upload this reviewed video to YouTube as PRIVATE?")) return; try { await api(`/jobs/${id}/upload`, {method:"POST", body:JSON.stringify({privacy:"private"})}); notice("uploaded privately"); refreshJobs(); } catch(e) { notice(e.message); } }
 function renderJob(j) {
   const status = String(j.status || "unknown"); const ready = status === "ready_for_review"; const terminal = ["failed","cancelled"].includes(status) || status.startsWith("uploaded_");
-  const title = esc(j.set_title || j.vibe || j.id); const sub = `\${esc(j.target_minutes || 45)} min · \${esc(j.tracks || "auto")} tracks · \${esc(status.replaceAll("_"," "))}`;
+  const title = esc(j.set_title || j.vibe || j.id); const sub = `${esc(j.target_minutes || 45)} min · ${esc(j.tracks || "auto")} tracks · ${esc(status.replaceAll("_"," "))}`;
   const card = document.createElement("div"); card.className = "job";
-  card.innerHTML = `<div class="job-head"><div><div class="job-title">\${title}</div><div class="job-sub">\${sub}</div></div><div class="state \${status.startsWith("failed") || status === "cancelled" ? "failed" : ""}">\${esc(status.replaceAll("_"," "))}</div></div>
-    <div class="progress"><i style="width:\${clamp(j.progress,0,100)}%"></i></div><div class="status">\${esc(j.current_step || j.error || (ready ? "Ready for review" : "Waiting"))}</div>
+  card.innerHTML = `<div class="job-head"><div><div class="job-title">${title}</div><div class="job-sub">${sub}</div></div><div class="state ${status.startsWith("failed") || status === "cancelled" ? "failed" : ""}">${esc(status.replaceAll("_"," "))}</div></div>
+    <div class="progress"><i style="width:${clamp(j.progress,0,100)}%"></i></div><div class="status">${esc(j.current_step || j.error || (ready ? "Ready for review" : "Waiting"))}</div>
     <div class="actions">
-      <button class="secondary" \${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="listen('\${j.id}',this.closest('.job'))">Listen</button>
-      <button class="secondary" \${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="watch('\${j.id}',this.closest('.job'))">Preview video</button>
-      <button class="secondary" \${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="loadMeta('\${j.id}',this.closest('.job'))">Edit metadata</button>
-      <button class="secondary" \${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="saveMeta('\${j.id}',this.closest('.job'))">Save metadata</button>
-      <button class="secondary" \${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="downloadFile('\${j.id}','video','vibe2music-\${j.id}.mp4')">Download MP4</button>
-      <button class="secondary" onclick="showLog('\${j.id}',this.closest('.job'))">Log</button>
-      <button \${ready ? "" : "disabled"} onclick="uploadPrivate('\${j.id}')">Upload private</button>
-      <button class="danger" \${terminal ? "disabled" : ""} onclick="cancelJob('\${j.id}')">Cancel</button>
-      <button class="secondary" \${status === "failed" || status === "cancelled" ? "" : "disabled"} onclick="retryJob('\${j.id}')">Retry</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="listen('${j.id}',this.closest('.job'))">Listen</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="watch('${j.id}',this.closest('.job'))">Preview video</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="loadMeta('${j.id}',this.closest('.job'))">Edit metadata</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="saveMeta('${j.id}',this.closest('.job'))">Save metadata</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="downloadFile('${j.id}','video','vibe2music-${j.id}.mp4')">Download MP4</button>
+      <button class="secondary" onclick="showLog('${j.id}',this.closest('.job'))">Log</button>
+      <button ${ready ? "" : "disabled"} onclick="uploadPrivate('${j.id}')">Upload private</button>
+      <button class="danger" ${terminal ? "disabled" : ""} onclick="cancelJob('${j.id}')">Cancel</button>
+      <button class="secondary" ${status === "failed" || status === "cancelled" ? "" : "disabled"} onclick="retryJob('${j.id}')">Retry</button>
     </div><audio controls style="display:none"></audio><video style="display:none"></video>
     <textarea class="meta" spellcheck="false"></textarea><textarea class="log" readonly spellcheck="false"></textarea>`;
   return card;
@@ -179,7 +179,7 @@ async function refreshJobs() {
   try { const jobs = await (await api("/jobs")).json(); $("jobs").innerHTML = "";
     if (!jobs.length) { $("jobs").innerHTML = '<div class="empty">No productions yet. Start with a vibe.</div>'; return; }
     jobs.forEach(j => $("jobs").appendChild(renderJob(j)));
-  } catch(e) { $("jobs").innerHTML = `<div class="empty">\${esc(e.message)}</div>`; }
+  } catch(e) { $("jobs").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 init(); setInterval(refreshJobs, 6000);
 </script>
