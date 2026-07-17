@@ -70,25 +70,64 @@ def run_qc(path: str | Path) -> dict:
     return {"file": str(path), "passed": all(c["passed"] for c in checks), "checks": checks}
 
 
+def prune_manifest(set_dir: Path, results: list[dict], min_keep: int = 2) -> None:
+    """Drop QC-failing files from manifest.json so downstream steps skip them.
+
+    Exits 1 only if fewer than min_keep tracks survive -- a couple of bad
+    tracks shouldn't kill an otherwise good set.
+    """
+    import json
+    mpath = set_dir / "manifest.json"
+    if not mpath.exists():
+        print("no manifest.json -- prune skipped")
+        return
+    manifest = json.loads(mpath.read_text(encoding="utf-8"))
+    passed_names = {Path(r["file"]).name for r in results if r["passed"]}
+    keep_idx = [i for i, f in enumerate(manifest["files"])
+                if Path(f).name in passed_names]
+    dropped = len(manifest["files"]) - len(keep_idx)
+    manifest["files"] = [manifest["files"][i] for i in keep_idx]
+    if manifest.get("tracks"):
+        manifest["tracks"] = [manifest["tracks"][i] for i in keep_idx]
+    mpath.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"prune: kept {len(keep_idx)}, dropped {dropped}")
+    if len(keep_idx) < min_keep:
+        print(f"fewer than {min_keep} tracks survived QC -- aborting", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
-        print(__doc__)
-        sys.exit(2)
-    target = Path(sys.argv[1])
+    import argparse
+    p = argparse.ArgumentParser(description="Deterministic audio QC.")
+    p.add_argument("target", type=Path, help="wav/mp3 file or a set directory")
+    p.add_argument("--prune", action="store_true",
+                   help="drop failing files from manifest.json instead of exiting 1 "
+                        "(pipeline keeps going with the good tracks)")
+    p.add_argument("--min-keep", type=int, default=2,
+                   help="with --prune: minimum surviving tracks (default 2)")
+    args = p.parse_args()
+
+    target = args.target
     files = sorted(target.glob("*.wav")) + sorted(target.glob("*.mp3")) \
         if target.is_dir() else [target]
+    files = [f for f in files if f.name != "mix.wav"]
     if not files:
         print(f"no audio files in {target}")
         sys.exit(2)
 
-    any_fail = False
+    any_fail, results = False, []
     for f in files:
         r = run_qc(f)
+        results.append(r)
         mark = "PASS" if r["passed"] else "FAIL"
         print(f"{mark}  {Path(r['file']).name}")
         for c in r["checks"]:
             print(f"      {'ok ' if c['passed'] else 'BAD'} {c['name']:<9} {c['details']}")
         any_fail |= not r["passed"]
+
+    if args.prune and target.is_dir():
+        prune_manifest(target, results, args.min_keep)
+        sys.exit(0)  # pruning handled the failures
     sys.exit(1 if any_fail else 0)
 
 

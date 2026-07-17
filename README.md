@@ -26,13 +26,31 @@ vibe2music/
 
 ## Option A -- CLI (simplest)
 
-On a RunPod RTX 4090 (~$0.35/hr):
+### A1. Local NVIDIA GPU (free after hardware)
+
+Linux or Windows+WSL2, NVIDIA driver installed:
+```
+bash local/setup_local.sh          # venv + CUDA torch + ACE-Step + ffmpeg
+source .venv/bin/activate
+export ANTHROPIC_API_KEY=sk-ant-...
+python src/run_all.py "rainy tokyo cafe" --instruments piano,vinyl \
+    --image cover.jpg --target-minutes 45
+# review mix.wav + metadata.json, then:
+python src/upload.py output/<set-name> --privacy private
+```
+- `generate.py` auto-detects the local GPU (`--device cuda` to force).
+- Cards under 12 GB VRAM auto-enable `--low-vram` CPU offload (slower, no OOM).
+- `--target-minutes 45` makes the whole run end-to-end: the compiler sizes the
+  track set, failed generations are retried, QC drops (not aborts on) bad
+  tracks, and the mix loops the set if needed to land at ~45 minutes.
+
+### A2. Cloud GPU (RunPod RTX 4090, ~$0.35/hr)
+
 ```
 bash runpod/setup.sh
 export ANTHROPIC_API_KEY=sk-ant-...
-python src/run_all.py "rainy tokyo cafe" --instruments piano,vinyl --image cover.jpg
-# review mix.wav + metadata.json, then:
-python src/upload.py output/<set-name> --privacy private
+python src/run_all.py "rainy tokyo cafe" --instruments piano,vinyl \
+    --image cover.jpg --target-minutes 45
 ```
 `--dry-run` on run_all.py previews the plan with zero GPU/API cost.
 

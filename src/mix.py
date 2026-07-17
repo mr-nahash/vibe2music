@@ -47,8 +47,13 @@ def _fmt_ts(sec: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def build_mix(set_dir: Path, loops: int = 1) -> tuple[Path, Path]:
-    """Returns (mix_wav_path, chapters_txt_path)."""
+def build_mix(set_dir: Path, loops: int = 1,
+              target_minutes: float | None = None) -> tuple[Path, Path]:
+    """Returns (mix_wav_path, chapters_txt_path).
+
+    target_minutes: auto-compute loops so the mix reaches at least this length
+    (a short set is repeated -- standard practice for long-form ambient mixes).
+    """
     manifest_path = set_dir / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -60,6 +65,18 @@ def build_mix(set_dir: Path, loops: int = 1) -> tuple[Path, Path]:
         files, titles = sorted(set_dir.glob("*.wav")), {}
     files = [f for f in files if f.exists() and f.name != "mix.wav"]
     assert files, f"no tracks found in {set_dir}"
+
+    if target_minutes:
+        set_sec = sum(sf.info(f).duration for f in files)
+        joined = set_sec - (len(files) - 1) * CROSSFADE_SEC  # first pass length
+        per_loop = set_sec - len(files) * CROSSFADE_SEC       # each repeat adds this
+        loops = 1
+        total = joined
+        while total < target_minutes * 60 and per_loop > 0:
+            loops += 1
+            total += per_loop
+        print(f"target {target_minutes:.0f} min: set is {set_sec/60:.1f} min "
+              f"-> {loops} loop(s) ~ {total/60:.1f} min")
 
     fade = int(CROSSFADE_SEC * SR)
     mix = None
@@ -83,8 +100,10 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Build a long mix from a track set.")
     p.add_argument("set_dir", type=Path)
     p.add_argument("--loops", type=int, default=1)
+    p.add_argument("--target-minutes", type=float, default=None,
+                   help="loop the set until the mix is at least this long")
     args = p.parse_args()
-    wav, ch = build_mix(args.set_dir, args.loops)
+    wav, ch = build_mix(args.set_dir, args.loops, args.target_minutes)
     dur = sf.info(wav).duration
     print(f"mix: {wav} ({dur/60:.1f} min)\nchapters: {ch}")
 

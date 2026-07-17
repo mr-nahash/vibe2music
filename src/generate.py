@@ -57,13 +57,18 @@ def detect_device(requested: str = "auto", allow_cpu: bool = False) -> str:
              "or force CPU with --allow-cpu.")
 
 
-def load_pipeline(device: str):
-    """Lazy-load ACE-Step so --dry-run works on machines without a GPU."""
+def load_pipeline(device: str, low_vram: bool = False):
+    """Lazy-load ACE-Step so --dry-run works on machines without a GPU.
+
+    low_vram: offload model parts to CPU between steps -- slower, but lets
+    consumer cards (8-12 GB) generate without OOM.
+    """
     # ---- ACE-Step API surface: adjust here if the release changed ----
     from acestep.pipeline_ace_step import ACEStepPipeline
     return ACEStepPipeline(
         dtype="bfloat16" if device == "cuda" else "float32",
         torch_compile=False,
+        cpu_offload=low_vram,
         device_id=0 if device == "cuda" else None,
     )
     # ------------------------------------------------------------------
@@ -91,6 +96,11 @@ def main() -> None:
     p.add_argument("--out", default="output")
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
     p.add_argument("--allow-cpu", action="store_true", help="permit (very slow) CPU generation")
+    p.add_argument("--low-vram", action="store_true",
+                   help="CPU-offload for consumer GPUs (auto-enabled below "
+                        f"{MIN_VRAM_GB + 4} GB VRAM)")
+    p.add_argument("--retries", type=int, default=1,
+                   help="regeneration attempts per failed track (default 1)")
     p.add_argument("--dry-run", action="store_true", help="print plan, generate nothing")
     args = p.parse_args()
 
@@ -106,27 +116,50 @@ def main() -> None:
         return
 
     device = detect_device(args.device, args.allow_cpu)
-    pipe = load_pipeline(device)
+
+    low_vram = args.low_vram
+    if device == "cuda" and not low_vram:
+        import torch
+        vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+        if vram < MIN_VRAM_GB + 4:  # <12 GB: offload by default to avoid OOM
+            print(f"{vram:.0f} GB VRAM -- enabling low-vram CPU offload")
+            low_vram = True
+
+    pipe = load_pipeline(device, low_vram)
     results, failures = [], []
     for t in plan["tracks"]:
         t0 = time.time()
-        try:
-            path = generate_track(pipe, t, out_dir)
-            results.append(path)
+        path, last_err = None, None
+        for attempt in range(1 + max(0, args.retries)):
+            try:
+                path = generate_track(pipe, t, out_dir)
+                break
+            except Exception as e:  # noqa: BLE001 -- keep the batch going
+                last_err = e
+                if device == "cuda":  # free VRAM before retrying
+                    import torch
+                    torch.cuda.empty_cache()
+                print(f"  retry[{t['index']:02d}] attempt {attempt + 1} failed: {e}",
+                      file=sys.stderr)
+        if path is not None:
+            results.append((t, path))
             print(f"  ok  [{t['index']:02d}] {path.name} ({time.time() - t0:.0f}s)")
-        except Exception as e:  # noqa: BLE001 -- keep the batch going
-            failures.append((t["index"], str(e)))
-            print(f"  FAIL[{t['index']:02d}] {e}", file=sys.stderr)
+        else:
+            failures.append((t["index"], str(last_err)))
+            print(f"  FAIL[{t['index']:02d}] {last_err}", file=sys.stderr)
 
     manifest = {
         "set_title": plan["set_title"],
         "mood_tags": plan.get("mood_tags", []),
-        "files": [str(r) for r in results],
+        "files": [str(p) for _, p in results],
+        "tracks": [t for t, _ in results],   # lets mix.py show proper titles
         "failures": failures,
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"done: {len(results)} ok, {len(failures)} failed -> {out_dir / 'manifest.json'}")
-    if failures:
+    # Partial failure is tolerable: qc --prune and mix --target-minutes recover.
+    # Only exit non-zero if nothing was produced at all.
+    if not results:
         sys.exit(1)
 
 

@@ -48,6 +48,7 @@ class JobIn(BaseModel):
     vibe: str
     instruments: str = ""
     tracks: int = 8
+    target_minutes: float | None = None  # e.g. 45 -> final mix ~45 min
 
 
 def _job_path(job_id: str) -> Path:
@@ -80,15 +81,21 @@ def _run_pipeline(job_dir: Path, spec: JobIn) -> None:
         return True
 
     prompts = job_dir / "prompts.json"
-    if not step("prompt_compiler.py", spec.vibe, "--instruments", spec.instruments,
-                "--tracks", str(spec.tracks), "--out", str(prompts)):
+    compile_args = [spec.vibe, "--instruments", spec.instruments,
+                    "--tracks", str(spec.tracks), "--out", str(prompts)]
+    if spec.target_minutes:
+        compile_args += ["--target-minutes", str(spec.target_minutes)]
+    if not step("prompt_compiler.py", *compile_args):
         return
     if not step("generate.py", str(prompts), "--out", str(job_dir)):
         return
     plan = json.loads(prompts.read_text(encoding="utf-8"))
     set_dir = job_dir / re.sub(r"[^a-z0-9]+", "-", plan["set_title"].lower()).strip("-")[:60]
     _set_state(job_dir, set_dir=str(set_dir), set_title=plan["set_title"])
-    for name, args in [("qc.py", [str(set_dir)]), ("mix.py", [str(set_dir)]),
+    mix_args = [str(set_dir)]
+    if spec.target_minutes:
+        mix_args += ["--target-minutes", str(spec.target_minutes)]
+    for name, args in [("qc.py", [str(set_dir), "--prune"]), ("mix.py", mix_args),
                        ("metadata.py", [str(set_dir)])]:
         if not step(name, *args):
             return

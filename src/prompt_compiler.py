@@ -50,10 +50,23 @@ def _image_block(path: str) -> dict:
 
 
 def compile_prompts(vibe: str | None, image: str | None,
-                    instruments: list[str], n_tracks: int = 8) -> dict:
-    """Ask the cheap model for a structured track-set plan. Returns parsed dict."""
+                    instruments: list[str], n_tracks: int = 8,
+                    target_minutes: float | None = None) -> dict:
+    """Ask the cheap model for a structured track-set plan. Returns parsed dict.
+
+    target_minutes: if set, overrides n_tracks so track durations sum to roughly
+    that length (assuming ~3.5 min average -- durations are clamped 120-240s).
+    """
     if not vibe and not image:
         raise ValueError("Provide a vibe description, an image, or both.")
+
+    duration_note = ""
+    if target_minutes:
+        # aim slightly over target: crossfades eat ~4s per join and a few
+        # tracks may be dropped by QC; mix.py trims/loops to hit the target.
+        n_tracks = max(4, round(target_minutes * 60 * 1.1 / 210))
+        duration_note = (f"\nTotal set duration should sum to roughly "
+                         f"{int(target_minutes * 60 * 1.1)} seconds across all tracks.")
 
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
 
@@ -63,7 +76,7 @@ def compile_prompts(vibe: str | None, image: str | None,
     content.append({"type": "text", "text": (
         f"Vibe: {vibe or 'infer the vibe entirely from the image'}\n"
         f"Instruments to feature: {', '.join(instruments) or 'your choice, keep it minimal'}\n"
-        f"Number of tracks: {n_tracks}"
+        f"Number of tracks: {n_tracks}{duration_note}"
     )})
 
     msg = client.messages.create(
@@ -90,12 +103,16 @@ def main() -> None:
     p.add_argument("--image", default=None, help="path to a mood image")
     p.add_argument("--instruments", default="", help="comma-separated instrument list")
     p.add_argument("--tracks", type=int, default=8)
+    p.add_argument("--target-minutes", type=float, default=None,
+                   help="size the set so the final mix lands near this length "
+                        "(overrides --tracks)")
     p.add_argument("--out", default="prompts.json")
     args = p.parse_args()
 
     instruments = [i.strip() for i in args.instruments.split(",") if i.strip()]
     try:
-        plan = compile_prompts(args.vibe, args.image, instruments, args.tracks)
+        plan = compile_prompts(args.vibe, args.image, instruments, args.tracks,
+                               args.target_minutes)
     except Exception as e:  # noqa: BLE001 -- CLI boundary
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
