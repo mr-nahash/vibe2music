@@ -29,7 +29,8 @@ def _palette(seed: bytes) -> tuple[tuple[int, int, int], ...]:
 
 
 def generate_cover(title: str, vibe: str, output: str | Path,
-                   width: int = 1920, height: int = 1080) -> Path:
+                   width: int = 1920, height: int = 1080,
+                   target_minutes: float = 45.0) -> Path:
     output = Path(output)
     seed = hashlib.sha256(f"{title}|{vibe}".encode("utf-8")).digest()
     colors = _palette(seed)
@@ -82,7 +83,7 @@ def generate_cover(title: str, vibe: str, output: str | Path,
         draw.text((x + 3, y + 3), line, font=title_font, fill=(0, 0, 0, 110))
         draw.text((x, y), line, font=title_font, fill=(255, 250, 244, 245))
         y += 88
-    subtitle = "45 MINUTES · INSTRUMENTAL SESSIONS"
+    subtitle = f"{max(1, round(target_minutes)):g} MINUTES · INSTRUMENTAL SESSIONS"
     bbox = draw.textbbox((0, 0), subtitle, font=subtitle_font)
     draw.text(((width - (bbox[2] - bbox[0])) // 2, y + 22), subtitle, font=subtitle_font, fill=(255, 235, 215, 220))
 
@@ -95,9 +96,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--title", required=True)
     parser.add_argument("--vibe", default="")
+    parser.add_argument("--minutes", type=float, default=45.0)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    print(f"cover: {generate_cover(args.title, args.vibe, args.out)}")
+    print(f"cover: {generate_cover(args.title, args.vibe, args.out, target_minutes=args.minutes)}")
 
 
 if __name__ == "__main__":
