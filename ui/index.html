@@ -176,6 +176,8 @@ function renderJob(j) {
   return card;
 }
 async function refreshJobs() {
+  if ([...document.querySelectorAll("audio,video")].some(media => !media.paused && !media.ended)) return;
+  if (document.activeElement && document.activeElement.classList.contains("meta")) return;
   try { const jobs = await (await api("/jobs")).json(); $("jobs").innerHTML = "";
     if (!jobs.length) { $("jobs").innerHTML = '<div class="empty">No productions yet. Start with a vibe.</div>'; return; }
     jobs.forEach(j => $("jobs").appendChild(renderJob(j)));
