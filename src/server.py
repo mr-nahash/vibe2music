@@ -444,7 +444,7 @@ def get_metadata(job_id: str, request: Request) -> dict[str, Any]:
     auth(request)
     state = _state(_job_path(job_id))
     file = Path(state.get("artifacts", {}).get("metadata", ""))
-    if not file.exists():
+    if not file.is_file():
         raise HTTPException(404, "metadata not ready")
     return json.loads(file.read_text(encoding="utf-8"))
 
