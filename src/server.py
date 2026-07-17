@@ -213,7 +213,15 @@ def _run_step(job_dir: Path, job_id: str, label: str, index: int,
 def _run_job(job_id: str) -> None:
     job_dir = JOBS_DIR / job_id
     state = _state(job_dir)
-    spec = JobIn.model_validate(state["spec"])
+    spec_payload = state.get("spec") or {
+        "vibe": state.get("vibe", ""),
+        "instruments": state.get("instruments", ""),
+        "tracks": state.get("tracks"),
+        "target_minutes": state.get("target_minutes", 45),
+        "device": "auto",
+        "device_id": 0,
+    }
+    spec = JobIn.model_validate(spec_payload)
     total = 8
     prompts = job_dir / "prompts.json"
     image_path = Path(state["image_path"]) if state.get("image_path") else None
@@ -287,7 +295,7 @@ async def _parse_job_request(request: Request) -> tuple[JobIn, UploadFile | None
             "device_id": form.get("device_id") or 0,
         }
         image = form.get("image")
-        if not isinstance(image, UploadFile):
+        if image is None or not hasattr(image, "read"):
             image = None
     else:
         try:
@@ -388,7 +396,7 @@ def retry_job(job_id: str, request: Request) -> dict[str, Any]:
 def _artifact(job_id: str, key: str, media_type: str, download: bool = False) -> FileResponse:
     state = _state(_job_path(job_id))
     path = Path(state.get("artifacts", {}).get(key, ""))
-    if not path.exists():
+    if not path.is_file():
         raise HTTPException(404, f"{key} not ready")
     return FileResponse(path, media_type=media_type, filename=path.name if download else None)
 
@@ -448,7 +456,7 @@ async def put_metadata(job_id: str, request: Request) -> dict[str, bool]:
     if not isinstance(body, dict) or not body.get("title") or "description" not in body:
         raise HTTPException(422, "metadata must contain title and description")
     file = Path(state.get("artifacts", {}).get("metadata", ""))
-    if not file.parent.exists():
+    if not file.is_file():
         raise HTTPException(404, "metadata not ready")
     atomic_write_json(file, body)
     return {"ok": True}
