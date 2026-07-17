@@ -1,27 +1,14 @@
-"""YouTube uploader: video.mp4 + metadata.json -> YouTube (Data API v3).
-
-Setup (one time):
-  1. Google Cloud project -> enable "YouTube Data API v3".
-  2. OAuth consent screen -> add yourself as test user.
-  3. Create OAuth client ID (Desktop app) -> download as client_secret.json
-     next to this script.
-  4. First run opens a browser for consent; token cached in token.json.
-NOTE: until your app passes Google's API audit, API uploads are LOCKED PRIVATE.
-Default here is private anyway -- you review in YouTube Studio, then publish.
-
-Usage:
-    python upload.py <set_dir> [--privacy private|unlisted|public] [--dry-run]
-"""
+"""Upload a reviewed render to YouTube, private by default."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
 
 
 def get_service():
@@ -38,65 +25,77 @@ def get_service():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(HERE / "client_secret.json"), SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(str(HERE / "client_secret.json"), SCOPES)
             creds = flow.run_local_server(port=0)
         token.write_text(creds.to_json(), encoding="utf-8")
     return build("youtube", "v3", credentials=creds)
 
 
-def upload(set_dir: Path, privacy: str = "private", dry_run: bool = False) -> str | None:
+def upload(set_dir: Path, privacy: str = "private", publish_at: str | None = None,
+           dry_run: bool = False) -> str | None:
     video = set_dir / "video.mp4"
-    meta = json.loads((set_dir / "metadata.json").read_text(encoding="utf-8"))
-    assert video.exists(), "run render.py first"
+    metadata_path = set_dir / "metadata.json"
+    if not video.exists():
+        raise FileNotFoundError(f"render first: {video}")
+    meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+    description = str(meta.get("description", ""))
+    if "ai assistance" not in description.lower():
+        description += "\n\nThis music was created with AI assistance and curated by a human."
+    status: dict[str, object] = {
+        "privacyStatus": privacy,
+        "selfDeclaredMadeForKids": False,
+        "containsSyntheticMedia": True,
+    }
+    if publish_at:
+        # YouTube expects an RFC 3339 timestamp and the video must stay private.
+        if privacy != "private":
+            raise ValueError("publish_at requires privacy=private")
+        parsed = datetime.fromisoformat(publish_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        status["publishAt"] = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     body = {
         "snippet": {
-            "title": meta["title"],
-            "description": meta["description"],
-            "tags": meta["tags"],
-            "categoryId": "10",  # Music
+            "title": str(meta.get("title", "Instrumental Mix"))[:100],
+            "description": description,
+            "tags": [str(tag) for tag in meta.get("tags", [])][:15],
+            "categoryId": "10",
         },
-        "status": {
-            "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": False,
-            # AI disclosure flag -- verify current field name in API docs:
-            # https://developers.google.com/youtube/v3/docs/videos#status
-            "containsSyntheticMedia": True,
-        },
+        "status": status,
     }
     if dry_run:
         print(json.dumps(body, indent=2))
-        print(f"dry-run: would upload {video} ({video.stat().st_size/1e6:.1f} MB)")
+        print(f"dry-run: would upload {video} ({video.stat().st_size / 1e6:.1f} MB)")
         return None
 
     from googleapiclient.http import MediaFileUpload
-    yt = get_service()
-    req = yt.videos().insert(
+
+    request = get_service().videos().insert(
         part="snippet,status", body=body,
         media_body=MediaFileUpload(str(video), chunksize=8 * 1024 * 1024, resumable=True),
     )
     response = None
     while response is None:
-        status, response = req.next_chunk()
-        if status:
-            print(f"  {int(status.progress() * 100)}%", end="\r")
-    vid = response["id"]
-    print(f"\nuploaded: https://youtu.be/{vid} (privacy: {privacy})")
-    return vid
+        progress, response = request.next_chunk()
+        if progress:
+            print(f"  {int(progress.progress() * 100)}%", end="\r")
+    video_id = response["id"]
+    print(f"\nuploaded: https://youtu.be/{video_id} (privacy: {privacy})")
+    return video_id
 
 
 def main() -> None:
-    p = argparse.ArgumentParser()
-    p.add_argument("set_dir", type=Path)
-    p.add_argument("--privacy", default="private", choices=["private", "unlisted", "public"])
-    p.add_argument("--dry-run", action="store_true")
-    args = p.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("set_dir", type=Path)
+    parser.add_argument("--privacy", default="private", choices=["private", "unlisted", "public"])
+    parser.add_argument("--publish-at", default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
     try:
-        upload(args.set_dir, args.privacy, args.dry_run)
-    except FileNotFoundError as e:
-        print(f"missing credentials file: {e}", file=sys.stderr)
-        sys.exit(1)
+        upload(args.set_dir, args.privacy, args.publish_at, args.dry_run)
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":
