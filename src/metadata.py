@@ -30,9 +30,10 @@ def _clean_title(value: str) -> str:
 
 def _fallback_metadata(manifest: dict[str, Any], chapters: str, vibe: str | None) -> dict[str, Any]:
     set_title = str(manifest.get("set_title", "Instrumental Sessions"))
+    minutes = max(1, round(float(manifest.get("target_duration_sec") or 2700) / 60))
     tags = [str(tag).lower() for tag in manifest.get("mood_tags", [])]
     tags += ["instrumental music", "focus music", "study music", "ambient music", "background music"]
-    title = _clean_title(f"{set_title} | 45-Minute Instrumental Focus Mix")
+    title = _clean_title(f"{set_title} | {minutes}-Minute Instrumental Focus Mix")
     description = (
         f"A continuous instrumental mix built around {vibe or set_title.lower()}. "
         "The album moves through several related arrangements so it can sit behind "
