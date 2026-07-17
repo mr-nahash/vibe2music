@@ -93,6 +93,7 @@ def load_pipeline(device: str, device_id: int = 0, checkpoint_path: str = "",
 
     kwargs: dict[str, Any] = {
         "checkpoint_dir": checkpoint_path or "",
+        "device_id": int(device_id),
         "dtype": "bfloat16" if device == "cuda" and bf16 else "float32",
         "torch_compile": bool(torch_compile),
         "cpu_offload": bool(cpu_offload),
