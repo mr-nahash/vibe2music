@@ -1,156 +1,483 @@
-"""GPU-box API server -- backend for the Cloudflare control panel.
+"""Durable single-GPU worker API for the web control panel.
 
-Run on the RunPod pod:  API_TOKEN=<secret> uvicorn server:app --host 0.0.0.0 --port 8000
-Expose the port via RunPod's proxy (it gives you an https URL); paste that URL
-plus your token into the Cloudflare UI settings.
-
-Endpoints (all require Authorization: Bearer <API_TOKEN>):
-  POST /jobs {vibe, instruments, tracks}  -> start a pipeline run (background)
-  GET  /jobs                              -> list jobs + status
-  GET  /jobs/{id}/audio                   -> stream mix.wav for review
-  GET  /jobs/{id}/metadata  /  PUT ...    -> read / edit metadata before publish
-  POST /jobs/{id}/upload                  -> upload to YouTube (private)
+The Cloudflare UI is only the control surface. This process owns generation,
+ffmpeg, job state, previews, and YouTube credentials on the local NVIDIA box.
+Only one generation job is executed at a time so two browser clicks cannot
+oversubscribe the GPU.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
 import threading
 import uuid
 from pathlib import Path
+from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-HERE = Path(__file__).parent
-JOBS_DIR = Path(os.environ.get("JOBS_DIR", "jobs"))
-JOBS_DIR.mkdir(exist_ok=True)
-API_TOKEN = os.environ.get("API_TOKEN") or sys.exit("set API_TOKEN env var")
+try:
+    from .common import atomic_write_json, env_bool, now_iso, ROOT, slugify
+except ImportError:  # direct script execution
+    from common import atomic_write_json, env_bool, now_iso, ROOT, slugify
 
-app = FastAPI(title="vibe2music")
-app.add_middleware(  # UI is on a different origin (Cloudflare Pages)
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+HERE = ROOT / "src"
+JOBS_DIR = Path(os.environ.get("JOBS_DIR", str(ROOT / "jobs")))
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+API_TOKEN = os.environ.get("API_TOKEN", "")
+MAX_IMAGE_BYTES = 12 * 1024 * 1024
+TERMINAL_STATUSES = {
+    "ready_for_review", "uploaded_private", "uploaded_unlisted",
+    "uploaded_public", "failed", "cancelled",
+}
+
+app = FastAPI(title="vibe2music production API", version="2.0")
+allowed_origins = [item.strip() for item in os.environ.get("UI_ORIGINS", "*").split(",") if item.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+STATE_LOCK = threading.RLock()
+QUEUE: queue.Queue[str] = queue.Queue()
+ENQUEUED: set[str] = set()
+CANCEL_EVENTS: dict[str, threading.Event] = {}
+WORKER_STARTED = False
 
 
 def auth(request: Request) -> None:
+    if not API_TOKEN:
+        raise HTTPException(503, "API_TOKEN is not configured on the GPU worker")
     if request.headers.get("authorization") != f"Bearer {API_TOKEN}":
         raise HTTPException(401, "bad token")
 
 
 class JobIn(BaseModel):
-    vibe: str
-    instruments: str = ""
-    tracks: int = 8
+    vibe: str = Field(min_length=1, max_length=1000)
+    instruments: str = Field(default="", max_length=500)
+    tracks: int | None = Field(default=None, ge=3, le=24)
+    target_minutes: float = Field(default=45.0, ge=1.0, le=180.0)
+    device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
+    device_id: int = Field(default=0, ge=0, le=15)
+
+
+class UploadIn(BaseModel):
+    privacy: Literal["private", "unlisted", "public"] = "private"
+    publish_at: str | None = None
 
 
 def _job_path(job_id: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{8}", job_id):
         raise HTTPException(400, "bad job id")
-    return JOBS_DIR / job_id
+    path = JOBS_DIR / job_id
+    if not path.is_dir():
+        raise HTTPException(404, "job not found")
+    return path
 
 
-def _state(job_dir: Path) -> dict:
-    f = job_dir / "state.json"
-    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+def _state(job_dir: Path) -> dict[str, Any]:
+    file = job_dir / "state.json"
+    if not file.exists():
+        return {}
+    try:
+        return json.loads(file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(500, f"corrupt job state: {job_dir.name}") from exc
 
 
-def _set_state(job_dir: Path, **kw) -> None:
-    s = _state(job_dir)
-    s.update(kw)
-    (job_dir / "state.json").write_text(json.dumps(s), encoding="utf-8")
+def _set_state(job_dir: Path, **updates: Any) -> dict[str, Any]:
+    with STATE_LOCK:
+        state = _state(job_dir)
+        state.update(updates)
+        state["updated_at"] = now_iso()
+        atomic_write_json(job_dir / "state.json", state)
+        return state
 
 
-def _run_pipeline(job_dir: Path, spec: JobIn) -> None:
-    """Background thread: compile -> generate -> qc -> mix -> render -> metadata."""
-    def step(name: str, *args: str) -> bool:
-        _set_state(job_dir, status=f"running:{name}")
-        r = subprocess.run([sys.executable, str(HERE / name), *args],
-                           capture_output=True, text=True)
-        (job_dir / "log.txt").open("a").write(f"\n=== {name} ===\n{r.stdout}{r.stderr}")
-        if r.returncode != 0:
-            _set_state(job_dir, status=f"failed:{name}")
+def _append_log(job_dir: Path, text: str) -> None:
+    with (job_dir / "log.txt").open("a", encoding="utf-8") as handle:
+        handle.write(text)
+        if not text.endswith("\n"):
+            handle.write("\n")
+
+
+def _hardware() -> dict[str, Any]:
+    result: dict[str, Any] = {"engine": "ace-step", "cuda": False, "device": "unknown"}
+    try:
+        import torch
+
+        result["torch"] = torch.__version__
+        result["cuda"] = bool(torch.cuda.is_available())
+        result["device_count"] = int(torch.cuda.device_count())
+        if result["cuda"]:
+            result["device"] = torch.cuda.get_device_name(0)
+            result["vram_gb"] = round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = type(exc).__name__
+    return result
+
+
+def _queue_job(job_id: str) -> None:
+    with STATE_LOCK:
+        if job_id in ENQUEUED:
+            return
+        ENQUEUED.add(job_id)
+    QUEUE.put(job_id)
+
+
+def _recover_jobs() -> None:
+    for job_dir in sorted(JOBS_DIR.iterdir()):
+        if not job_dir.is_dir() or not (job_dir / "state.json").exists():
+            continue
+        state = _state(job_dir)
+        status = str(state.get("status", ""))
+        if status == "queued" or status.startswith("running:"):
+            _set_state(job_dir, status="queued", current_step="waiting_for_gpu")
+            _queue_job(job_dir.name)
+
+
+def _start_worker() -> None:
+    global WORKER_STARTED
+    with STATE_LOCK:
+        if WORKER_STARTED:
+            return
+        WORKER_STARTED = True
+    _recover_jobs()
+    threading.Thread(target=_worker_loop, name="vibe2music-worker", daemon=True).start()
+
+
+def _worker_loop() -> None:
+    while True:
+        job_id = QUEUE.get()
+        try:
+            _run_job(job_id)
+        except Exception as exc:  # noqa: BLE001
+            job_dir = JOBS_DIR / job_id
+            if job_dir.is_dir():
+                _append_log(job_dir, f"\nWORKER ERROR: {type(exc).__name__}: {exc}\n")
+                _set_state(job_dir, status="failed", error=f"{type(exc).__name__}: {exc}", progress=0)
+        finally:
+            with STATE_LOCK:
+                ENQUEUED.discard(job_id)
+                CANCEL_EVENTS.pop(job_id, None)
+            QUEUE.task_done()
+
+
+def _run_step(job_dir: Path, job_id: str, label: str, index: int,
+              total: int, script: str, *args: str) -> bool:
+    cancel = CANCEL_EVENTS.setdefault(job_id, threading.Event())
+    if cancel.is_set():
+        _set_state(job_dir, status="cancelled", current_step=None)
+        return False
+    _set_state(job_dir, status=f"running:{label}", current_step=label,
+               progress=round(index / total * 100))
+    command = [sys.executable, str(HERE / script), *args]
+    _append_log(job_dir, f"\n=== {label} ===\n$ {' '.join(command)}\n")
+    process = subprocess.Popen(
+        command, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    assert process.stdout is not None
+    while True:
+        line = process.stdout.readline()
+        if line:
+            _append_log(job_dir, line)
+        if cancel.is_set() and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            _set_state(job_dir, status="cancelled", current_step=None)
             return False
-        return True
+        if not line and process.poll() is not None:
+            break
+    return_code = process.wait()
+    if return_code != 0:
+        _set_state(job_dir, status=f"failed:{label}", error=f"{label} exited with {return_code}")
+        return False
+    _set_state(job_dir, progress=round((index + 1) / total * 100))
+    return True
 
+
+def _run_job(job_id: str) -> None:
+    job_dir = JOBS_DIR / job_id
+    state = _state(job_dir)
+    spec = JobIn.model_validate(state["spec"])
+    total = 8
     prompts = job_dir / "prompts.json"
-    if not step("prompt_compiler.py", spec.vibe, "--instruments", spec.instruments,
-                "--tracks", str(spec.tracks), "--out", str(prompts)):
+    image_path = Path(state["image_path"]) if state.get("image_path") else None
+
+    compile_args = [
+        state["vibe"], "--instruments", spec.instruments,
+        "--target-minutes", str(spec.target_minutes), "--out", str(prompts),
+    ]
+    if spec.tracks is not None:
+        compile_args += ["--tracks", str(spec.tracks)]
+    if image_path:
+        compile_args += ["--image", str(image_path)]
+    if not _run_step(job_dir, job_id, "planning", 0, total, "prompt_compiler.py", *compile_args):
         return
-    if not step("generate.py", str(prompts), "--out", str(job_dir)):
+
+    generate_args = [
+        str(prompts), "--out", str(job_dir), "--device", spec.device,
+        "--device-id", str(spec.device_id),
+    ]
+    if spec.device == "cpu":
+        generate_args.append("--allow-cpu")
+    if not _run_step(job_dir, job_id, "generation", 1, total, "generate.py", *generate_args):
         return
+
     plan = json.loads(prompts.read_text(encoding="utf-8"))
-    set_dir = job_dir / re.sub(r"[^a-z0-9]+", "-", plan["set_title"].lower()).strip("-")[:60]
+    set_dir = job_dir / slugify(plan["set_title"])
     _set_state(job_dir, set_dir=str(set_dir), set_title=plan["set_title"])
-    for name, args in [("qc.py", [str(set_dir)]), ("mix.py", [str(set_dir)]),
-                       ("metadata.py", [str(set_dir)])]:
-        if not step(name, *args):
+    if not _run_step(job_dir, job_id, "quality_control", 2, total, "qc.py", str(set_dir), "--min-passed", "1"):
+        return
+    if not _run_step(job_dir, job_id, "assembly", 3, total, "mix.py", str(set_dir), "--target-minutes", str(spec.target_minutes)):
+        return
+    if not _run_step(job_dir, job_id, "metadata", 4, total, "metadata.py", str(set_dir), "--vibe", state["vibe"]):
+        return
+
+    if image_path:
+        cover_path = image_path
+        _set_state(job_dir, current_step="cover", progress=round(5 / total * 100), cover_path=str(cover_path))
+    else:
+        cover_path = set_dir / "cover.png"
+        if not _run_step(
+            job_dir, job_id, "cover", 5, total, "cover.py",
+            "--title", plan["set_title"], "--vibe", state["vibe"], "--out", str(cover_path),
+        ):
             return
-    # Video needs a cover image; use image.jpg dropped into the job dir, else skip.
-    img = job_dir / "image.jpg"
-    if img.exists():
-        if not step("render.py", str(set_dir), "--image", str(img)):
-            return
-    _set_state(job_dir, status="ready_for_review")
+    _set_state(job_dir, cover_path=str(cover_path))
+    if not _run_step(job_dir, job_id, "render", 6, total, "render.py", str(set_dir), "--image", str(cover_path)):
+        return
+
+    _set_state(
+        job_dir, status="ready_for_review", current_step=None, progress=100,
+        artifacts={
+            "audio": str(set_dir / "preview.mp3" if (set_dir / "preview.mp3").exists() else set_dir / "mix.wav"),
+            "master_audio": str(set_dir / "mix.wav"),
+            "video": str(set_dir / "video.mp4"),
+            "metadata": str(set_dir / "metadata.json"),
+            "cover": str(cover_path),
+        },
+    )
 
 
-@app.post("/jobs", dependencies=[Depends(auth)])
-def create_job(spec: JobIn) -> dict:
+async def _parse_job_request(request: Request) -> tuple[JobIn, UploadFile | None]:
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        payload: dict[str, Any] = {
+            "vibe": str(form.get("vibe", "")),
+            "instruments": str(form.get("instruments", "")),
+            "tracks": form.get("tracks") or None,
+            "target_minutes": form.get("target_minutes") or 45,
+            "device": str(form.get("device", "auto")),
+            "device_id": form.get("device_id") or 0,
+        }
+        image = form.get("image")
+        if not isinstance(image, UploadFile):
+            image = None
+    else:
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "expected JSON or multipart form data") from exc
+        image = None
+    try:
+        return JobIn.model_validate(payload), image
+    except Exception as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+async def _save_image(job_dir: Path, image: UploadFile | None) -> Path | None:
+    if image is None or not image.filename:
+        return None
+    suffix = Path(image.filename).suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(415, "cover image must be JPG, PNG, or WEBP")
+    contents = await image.read()
+    if len(contents) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, "cover image is larger than 12 MB")
+    destination = job_dir / f"image{suffix}"
+    destination.write_bytes(contents)
+    return destination
+
+
+@app.get("/health")
+def health(request: Request) -> dict[str, Any]:
+    auth(request)
+    return {"ok": True, "worker": WORKER_STARTED, "hardware": _hardware()}
+
+
+@app.post("/jobs")
+async def create_job(request: Request) -> dict[str, Any]:
+    auth(request)
+    spec, image = await _parse_job_request(request)
+    _start_worker()
     job_id = uuid.uuid4().hex[:8]
     job_dir = JOBS_DIR / job_id
-    job_dir.mkdir()
-    _set_state(job_dir, id=job_id, vibe=spec.vibe, status="queued")
-    threading.Thread(target=_run_pipeline, args=(job_dir, spec), daemon=True).start()
-    return {"id": job_id}
+    job_dir.mkdir(parents=True, exist_ok=False)
+    image_path = await _save_image(job_dir, image)
+    state = {
+        "id": job_id,
+        "vibe": spec.vibe,
+        "spec": spec.model_dump(),
+        "target_minutes": spec.target_minutes,
+        "tracks": spec.tracks,
+        "status": "queued",
+        "progress": 0,
+        "created_at": now_iso(),
+        "image_path": str(image_path) if image_path else None,
+    }
+    atomic_write_json(job_dir / "state.json", state)
+    _append_log(job_dir, f"created {now_iso()}\n")
+    CANCEL_EVENTS[job_id] = threading.Event()
+    _queue_job(job_id)
+    return {"id": job_id, "status": "queued"}
 
 
-@app.get("/jobs", dependencies=[Depends(auth)])
-def list_jobs() -> list[dict]:
-    return sorted((_state(d) for d in JOBS_DIR.iterdir() if d.is_dir()),
-                  key=lambda s: s.get("id", ""), reverse=True)
+@app.get("/jobs")
+def list_jobs(request: Request) -> list[dict[str, Any]]:
+    auth(request)
+    jobs = []
+    for job_dir in JOBS_DIR.iterdir():
+        if job_dir.is_dir() and (job_dir / "state.json").exists():
+            jobs.append(_state(job_dir))
+    return sorted(jobs, key=lambda item: item.get("created_at", ""), reverse=True)
 
 
-@app.get("/jobs/{job_id}/audio", dependencies=[Depends(auth)])
-def get_audio(job_id: str) -> FileResponse:
-    s = _state(_job_path(job_id))
-    mix = Path(s.get("set_dir", "")) / "mix.wav"
-    if not mix.exists():
-        raise HTTPException(404, "mix not ready")
-    return FileResponse(mix, media_type="audio/wav")
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, request: Request) -> dict[str, Any]:
+    auth(request)
+    job_dir = _job_path(job_id)
+    state = _state(job_dir)
+    if state.get("status") in TERMINAL_STATUSES:
+        return state
+    CANCEL_EVENTS.setdefault(job_id, threading.Event()).set()
+    if state.get("status") == "queued":
+        _set_state(job_dir, status="cancelled", current_step=None)
+    return _state(job_dir)
 
 
-@app.get("/jobs/{job_id}/metadata", dependencies=[Depends(auth)])
-def get_metadata(job_id: str) -> dict:
-    s = _state(_job_path(job_id))
-    f = Path(s.get("set_dir", "")) / "metadata.json"
-    if not f.exists():
+@app.post("/jobs/{job_id}/retry")
+def retry_job(job_id: str, request: Request) -> dict[str, Any]:
+    auth(request)
+    job_dir = _job_path(job_id)
+    state = _state(job_dir)
+    if str(state.get("status", "")).startswith("running"):
+        raise HTTPException(409, "job is still running")
+    _set_state(job_dir, status="queued", progress=0, error=None, current_step="waiting_for_gpu")
+    CANCEL_EVENTS[job_id] = threading.Event()
+    _start_worker()
+    _queue_job(job_id)
+    return {"id": job_id, "status": "queued"}
+
+
+def _artifact(job_id: str, key: str, media_type: str, download: bool = False) -> FileResponse:
+    state = _state(_job_path(job_id))
+    path = Path(state.get("artifacts", {}).get(key, ""))
+    if not path.exists():
+        raise HTTPException(404, f"{key} not ready")
+    return FileResponse(path, media_type=media_type, filename=path.name if download else None)
+
+
+@app.get("/jobs/{job_id}/audio")
+def get_audio(job_id: str, request: Request) -> FileResponse:
+    auth(request)
+    return _artifact(job_id, "audio", "audio/mpeg")
+
+
+@app.get("/jobs/{job_id}/download/audio")
+def download_audio(job_id: str, request: Request) -> FileResponse:
+    auth(request)
+    return _artifact(job_id, "master_audio", "audio/wav", download=True)
+
+
+@app.get("/jobs/{job_id}/video")
+def get_video(job_id: str, request: Request) -> FileResponse:
+    auth(request)
+    return _artifact(job_id, "video", "video/mp4")
+
+
+@app.get("/jobs/{job_id}/download/video")
+def download_video(job_id: str, request: Request) -> FileResponse:
+    auth(request)
+    return _artifact(job_id, "video", "video/mp4", download=True)
+
+
+@app.get("/jobs/{job_id}/cover")
+def get_cover(job_id: str, request: Request) -> FileResponse:
+    auth(request)
+    return _artifact(job_id, "cover", "image/png")
+
+
+@app.get("/jobs/{job_id}/log")
+def get_log(job_id: str, request: Request) -> dict[str, str]:
+    auth(request)
+    job_dir = _job_path(job_id)
+    return {"log": (job_dir / "log.txt").read_text(encoding="utf-8") if (job_dir / "log.txt").exists() else ""}
+
+
+@app.get("/jobs/{job_id}/metadata")
+def get_metadata(job_id: str, request: Request) -> dict[str, Any]:
+    auth(request)
+    state = _state(_job_path(job_id))
+    file = Path(state.get("artifacts", {}).get("metadata", ""))
+    if not file.exists():
         raise HTTPException(404, "metadata not ready")
-    return json.loads(f.read_text(encoding="utf-8"))
+    return json.loads(file.read_text(encoding="utf-8"))
 
 
-@app.put("/jobs/{job_id}/metadata", dependencies=[Depends(auth)])
-async def put_metadata(job_id: str, request: Request) -> dict:
-    s = _state(_job_path(job_id))
+@app.put("/jobs/{job_id}/metadata")
+async def put_metadata(job_id: str, request: Request) -> dict[str, bool]:
+    auth(request)
+    state = _state(_job_path(job_id))
     body = await request.json()
-    (Path(s["set_dir"]) / "metadata.json").write_text(
-        json.dumps(body, indent=2), encoding="utf-8")
+    if not isinstance(body, dict) or not body.get("title") or "description" not in body:
+        raise HTTPException(422, "metadata must contain title and description")
+    file = Path(state.get("artifacts", {}).get("metadata", ""))
+    if not file.parent.exists():
+        raise HTTPException(404, "metadata not ready")
+    atomic_write_json(file, body)
     return {"ok": True}
 
 
-@app.post("/jobs/{job_id}/upload", dependencies=[Depends(auth)])
-def do_upload(job_id: str) -> dict:
+@app.post("/jobs/{job_id}/upload")
+def do_upload(job_id: str, request: Request, payload: UploadIn | None = None) -> dict[str, Any]:
+    auth(request)
     job_dir = _job_path(job_id)
-    s = _state(job_dir)
-    r = subprocess.run([sys.executable, str(HERE / "upload.py"), s["set_dir"],
-                        "--privacy", "private"], capture_output=True, text=True)
-    (job_dir / "log.txt").open("a").write(f"\n=== upload ===\n{r.stdout}{r.stderr}")
-    if r.returncode != 0:
-        raise HTTPException(500, r.stderr[-500:])
-    _set_state(job_dir, status="uploaded_private")
-    return {"ok": True, "note": "uploaded private -- publish from YouTube Studio"}
+    state = _state(job_dir)
+    if state.get("status") not in {"ready_for_review", "uploaded_private", "uploaded_unlisted"}:
+        raise HTTPException(409, "job is not ready for review")
+    payload = payload or UploadIn()
+    if payload.privacy == "public" and not env_bool("V2M_ALLOW_PUBLIC_UPLOAD", False):
+        raise HTTPException(403, "public upload is disabled; set V2M_ALLOW_PUBLIC_UPLOAD=true explicitly")
+    set_dir = state.get("set_dir")
+    if not set_dir:
+        raise HTTPException(404, "render not ready")
+    command = [sys.executable, str(HERE / "upload.py"), str(set_dir), "--privacy", payload.privacy]
+    if payload.publish_at:
+        command += ["--publish-at", payload.publish_at]
+    result = subprocess.run(command, cwd=str(ROOT), capture_output=True, text=True)
+    _append_log(job_dir, f"\n=== youtube upload ===\n{result.stdout}{result.stderr}")
+    if result.returncode != 0:
+        raise HTTPException(500, result.stderr[-1000:] or "YouTube upload failed")
+    status = f"uploaded_{payload.privacy}"
+    match = re.search(r"https://youtu\.be/([A-Za-z0-9_-]+)", result.stdout)
+    _set_state(job_dir, status=status, youtube_video_id=match.group(1) if match else None, publish_at=payload.publish_at)
+    return {"ok": True, "status": status, "video_id": match.group(1) if match else None}
+
+
+_start_worker()
