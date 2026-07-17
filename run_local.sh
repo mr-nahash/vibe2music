@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="${VENV:-${ROOT}/.venv}"
+cd "${ROOT}"
 if [[ ! -x "${VENV}/bin/python" ]]; then
   echo "Missing ${VENV}. Run ./setup_local.sh first." >&2
   exit 1
