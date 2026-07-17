@@ -263,7 +263,8 @@ def _run_job(job_id: str) -> None:
         cover_path = set_dir / "cover.png"
         if not _run_step(
             job_dir, job_id, "cover", 5, total, "cover.py",
-            "--title", plan["set_title"], "--vibe", state["vibe"], "--out", str(cover_path),
+            "--title", plan["set_title"], "--vibe", state["vibe"],
+            "--minutes", str(spec.target_minutes), "--out", str(cover_path),
         ):
             return
     _set_state(job_dir, cover_path=str(cover_path))
