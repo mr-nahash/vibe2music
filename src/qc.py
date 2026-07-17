@@ -1,13 +1,15 @@
-"""Deterministic audio QC -- no LLM calls (tier: scripts, cost: zero).
+"""Deterministic audio quality gate.
 
-Checks: silence, clipping, loudness (target -14 LUFS), duration.
-
-Usage:
-    python qc.py <file.wav | directory>   # exits 1 if any file fails
+QC writes ``qc.json`` for the mixer and returns success when at least the
+requested number of tracks pass. A single bad generation no longer destroys an
+otherwise usable album; use ``--strict`` when a CLI caller wants every file to
+pass.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -16,7 +18,6 @@ import numpy as np
 
 
 def check_silence(y: np.ndarray, sr: int, max_silence_sec: float = 5.0) -> dict:
-    """Flag long leading/trailing/internal silence."""
     intervals = librosa.effects.split(y, top_db=40)
     if len(intervals) == 0:
         return {"name": "silence", "passed": False, "details": "entirely silent"}
@@ -32,64 +33,86 @@ def check_silence(y: np.ndarray, sr: int, max_silence_sec: float = 5.0) -> dict:
 
 
 def check_clipping(y: np.ndarray, threshold: float = 0.99) -> dict:
-    """Fraction of samples at/near full scale."""
     frac = float(np.mean(np.abs(y) >= threshold))
     return {"name": "clipping", "passed": frac < 1e-4, "details": f"{frac:.2e} samples clipped"}
 
 
-def check_loudness(y: np.ndarray, sr: int) -> dict:
-    """Integrated loudness vs the -14 LUFS streaming target (pass window -20..-9)."""
+def check_loudness(y: np.ndarray, sr: int, low: float = -20.0, high: float = -9.0) -> dict:
     try:
         import pyloudnorm
-        lufs = pyloudnorm.Meter(sr).integrated_loudness(y)
-    except ImportError:  # fallback: RMS-based rough estimate
+
+        lufs = float(pyloudnorm.Meter(sr).integrated_loudness(y))
+    except ImportError:
         rms = float(np.sqrt(np.mean(y ** 2)))
         lufs = 20 * np.log10(rms + 1e-12)
-    return {"name": "loudness", "passed": -20.0 <= lufs <= -9.0, "details": f"{lufs:.1f} LUFS"}
+    passed = np.isfinite(lufs) and low <= lufs <= high
+    return {"name": "loudness", "passed": bool(passed), "details": f"{lufs:.1f} LUFS"}
 
 
 def check_duration(y: np.ndarray, sr: int, min_sec: float = 60, max_sec: float = 300) -> dict:
-    dur = len(y) / sr
-    return {"name": "duration", "passed": min_sec <= dur <= max_sec, "details": f"{dur:.0f}s"}
+    duration = len(y) / sr
+    return {"name": "duration", "passed": min_sec <= duration <= max_sec, "details": f"{duration:.0f}s"}
 
 
-def run_qc(path: str | Path) -> dict:
-    """All checks for one file. Load errors fail the file rather than crash."""
+def run_qc(path: str | Path, max_silence_sec: float = 5.0) -> dict:
     path = Path(path)
     try:
         y, sr = librosa.load(path, sr=None, mono=True)
-    except Exception as e:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - a load error is a failed track
         return {"file": str(path), "passed": False,
-                "checks": [{"name": "load", "passed": False, "details": str(e)}]}
+                "checks": [{"name": "load", "passed": False, "details": str(exc)}]}
     checks = [
-        check_silence(y, sr),
+        check_silence(y, sr, max_silence_sec),
         check_clipping(y),
         check_loudness(y, sr),
         check_duration(y, sr),
     ]
-    return {"file": str(path), "passed": all(c["passed"] for c in checks), "checks": checks}
+    return {"file": str(path), "passed": all(item["passed"] for item in checks), "checks": checks}
+
+
+def _files_for(target: Path) -> list[Path]:
+    if not target.is_dir():
+        return [target]
+    manifest = target / "manifest.json"
+    if manifest.exists():
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        files = [Path(item) for item in payload.get("files", [])]
+    else:
+        files = sorted(target.glob("*.wav")) + sorted(target.glob("*.mp3"))
+    return [path for path in files if path.exists() and path.name not in {"mix.wav", "master.wav"}]
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        print(__doc__)
-        sys.exit(2)
-    target = Path(sys.argv[1])
-    files = sorted(target.glob("*.wav")) + sorted(target.glob("*.mp3")) \
-        if target.is_dir() else [target]
-    if not files:
-        print(f"no audio files in {target}")
-        sys.exit(2)
+    parser = argparse.ArgumentParser(description="Run deterministic audio QC")
+    parser.add_argument("target")
+    parser.add_argument("--min-passed", type=int, default=1)
+    parser.add_argument("--strict", action="store_true", help="require every input file to pass")
+    parser.add_argument("--max-silence-sec", type=float, default=5.0)
+    args = parser.parse_args()
 
-    any_fail = False
-    for f in files:
-        r = run_qc(f)
-        mark = "PASS" if r["passed"] else "FAIL"
-        print(f"{mark}  {Path(r['file']).name}")
-        for c in r["checks"]:
-            print(f"      {'ok ' if c['passed'] else 'BAD'} {c['name']:<9} {c['details']}")
-        any_fail |= not r["passed"]
-    sys.exit(1 if any_fail else 0)
+    target = Path(args.target)
+    files = _files_for(target)
+    if not files:
+        print(f"no audio files in {target}", file=sys.stderr)
+        sys.exit(2)
+    report = []
+    for path in files:
+        result = run_qc(path, args.max_silence_sec)
+        report.append(result)
+        mark = "PASS" if result["passed"] else "FAIL"
+        print(f"{mark}  {path.name}")
+        for check in result["checks"]:
+            print(f"      {'ok ' if check['passed'] else 'BAD'} {check['name']:<9} {check['details']}")
+
+    out_dir = target if target.is_dir() else target.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "qc.json").write_text(json.dumps({"files": report}, indent=2), encoding="utf-8")
+    passed = sum(1 for item in report if item["passed"])
+    threshold_met = passed >= max(1, args.min_passed)
+    if args.strict:
+        threshold_met = threshold_met and passed == len(report)
+    print(f"QC summary: {passed}/{len(report)} passed; report: {out_dir / 'qc.json'}")
+    sys.exit(0 if threshold_met else 1)
 
 
 if __name__ == "__main__":
