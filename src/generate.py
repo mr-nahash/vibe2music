@@ -1,12 +1,15 @@
-"""Generation runner: prompts.json -> WAV files via ACE-Step on a local/rented GPU.
+"""Generation runner: prompts.json -> WAV files via ACE-Step.
 
-Run this on the RunPod box after runpod/setup.sh.
+Device selection is automatic: prefers a local NVIDIA GPU when present,
+falls back to Apple Silicon (mps), and only then CPU (very slow -- requires
+--allow-cpu so you don't burn hours by accident). Override with --device.
+
 NOTE: ACE-Step's Python API may drift between releases -- if the import or call
 signature fails, check `python -c "import acestep; help(acestep)"` and adjust
-the marked section only.
+the marked sections only.
 
 Usage:
-    python generate.py prompts.json --out output/ [--dry-run]
+    python generate.py prompts.json --out output/ [--device auto|cuda|mps|cpu] [--dry-run]
 """
 
 from __future__ import annotations
@@ -18,16 +21,51 @@ import sys
 import time
 from pathlib import Path
 
+MIN_VRAM_GB = 8  # below this, ACE-Step inference will struggle
+
 
 def slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60]
 
 
-def load_pipeline():
+def detect_device(requested: str = "auto", allow_cpu: bool = False) -> str:
+    """Pick the best available device, preferring a local GPU."""
+    import torch
+
+    if requested != "auto":
+        if requested == "cpu" and not allow_cpu:
+            sys.exit("CPU generation is extremely slow -- rerun with --allow-cpu to confirm.")
+        return requested
+
+    if torch.cuda.is_available():
+        name = torch.cuda.get_device_name(0)
+        vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"local GPU detected: {name} ({vram:.0f} GB VRAM)")
+        if vram < MIN_VRAM_GB:
+            print(f"warning: <{MIN_VRAM_GB} GB VRAM -- generation may OOM; "
+                  "consider a cloud GPU if it fails")
+        return "cuda"
+
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        print("Apple Silicon GPU detected (mps)")
+        return "mps"
+
+    if allow_cpu:
+        print("no GPU found -- running on CPU (very slow)")
+        return "cpu"
+    sys.exit("no GPU detected. Options: run on a cloud GPU (see runpod/setup.sh), "
+             "or force CPU with --allow-cpu.")
+
+
+def load_pipeline(device: str):
     """Lazy-load ACE-Step so --dry-run works on machines without a GPU."""
     # ---- ACE-Step API surface: adjust here if the release changed ----
     from acestep.pipeline_ace_step import ACEStepPipeline
-    return ACEStepPipeline(dtype="bfloat16", torch_compile=False)
+    return ACEStepPipeline(
+        dtype="bfloat16" if device == "cuda" else "float32",
+        torch_compile=False,
+        device_id=0 if device == "cuda" else None,
+    )
     # ------------------------------------------------------------------
 
 
@@ -51,6 +89,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Generate tracks from prompts.json")
     p.add_argument("prompts", help="path to prompts.json from prompt_compiler.py")
     p.add_argument("--out", default="output")
+    p.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
+    p.add_argument("--allow-cpu", action="store_true", help="permit (very slow) CPU generation")
     p.add_argument("--dry-run", action="store_true", help="print plan, generate nothing")
     args = p.parse_args()
 
@@ -65,7 +105,8 @@ def main() -> None:
                   f"| {t['duration_sec']}s | {t['prompt'][:70]}...")
         return
 
-    pipe = load_pipeline()
+    device = detect_device(args.device, args.allow_cpu)
+    pipe = load_pipeline(device)
     results, failures = [], []
     for t in plan["tracks"]:
         t0 = time.time()
@@ -77,7 +118,6 @@ def main() -> None:
             failures.append((t["index"], str(e)))
             print(f"  FAIL[{t['index']:02d}] {e}", file=sys.stderr)
 
-    # Write a manifest for qc.py / later phases.
     manifest = {
         "set_title": plan["set_title"],
         "mood_tags": plan.get("mood_tags", []),
