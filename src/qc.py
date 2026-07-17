@@ -27,7 +27,9 @@ def check_silence(y: np.ndarray, sr: int, max_silence_sec: float = 5.0) -> dict:
     worst = max([lead, trail] + gaps) if gaps else max(lead, trail)
     return {
         "name": "silence",
-        "passed": worst <= max_silence_sec,
+        # ``worst`` is usually a NumPy scalar; cast the comparison result so
+        # the report can be serialized by the standard JSON encoder.
+        "passed": bool(worst <= max_silence_sec),
         "details": f"worst gap {worst:.1f}s (lead {lead:.1f}s, trail {trail:.1f}s)",
     }
 
@@ -51,7 +53,11 @@ def check_loudness(y: np.ndarray, sr: int, low: float = -20.0, high: float = -9.
 
 def check_duration(y: np.ndarray, sr: int, min_sec: float = 60, max_sec: float = 300) -> dict:
     duration = len(y) / sr
-    return {"name": "duration", "passed": min_sec <= duration <= max_sec, "details": f"{duration:.0f}s"}
+    return {
+        "name": "duration",
+        "passed": bool(min_sec <= duration <= max_sec),
+        "details": f"{duration:.0f}s",
+    }
 
 
 def run_qc(path: str | Path, max_silence_sec: float = 5.0) -> dict:
