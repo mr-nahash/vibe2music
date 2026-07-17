@@ -38,6 +38,10 @@
     button.secondary { background:var(--panel2); color:var(--ink); border:1px solid var(--line); }
     button.danger { color:#210f15; background:var(--danger); }
     .status { color:var(--muted); font-size:13px; min-height:20px; }
+    .status.ok { color:var(--accent2); }
+    .status.error { color:var(--danger); font-weight:600; }
+    .status.pending { color:var(--warn); }
+    #message { flex:1; }
     .notice { border-left:3px solid var(--warn); padding:8px 12px; color:#e6d4b9; background:#f4bd7710;
       border-radius:6px; font-size:13px; margin-top:12px; }
     #jobs { display:grid; gap:12px; }
@@ -80,6 +84,7 @@
         <button class="secondary" onclick="checkHealth()">Check GPU</button>
       </div>
       <div id="health" class="status" style="margin-top:10px"></div>
+      <div id="connectionHint" class="notice">Start the GPU worker on the computer with the NVIDIA GPU, then enter its URL and API token here before starting a production.</div>
       <div class="small">For a deployed HTTPS panel, expose the local API through an HTTPS tunnel. Never put an unprotected API on the public internet.</div>
     </section>
 
@@ -98,7 +103,7 @@
         <div><label for="deviceId">NVIDIA device ID</label><input id="deviceId" type="number" value="0" min="0" max="15"></div>
       </div>
       <label for="image">Optional cover image</label><input id="image" type="file" accept=".jpg,.jpeg,.png,.webp,image/*">
-      <div class="row" style="margin-top:12px"><button onclick="createJob()">Start production</button><div id="message" class="status"></div></div>
+      <div class="row" style="margin-top:12px"><button id="startProduction" onclick="createJob()">Start production</button><div id="message" class="status" role="status" aria-live="polite"></div></div>
     </section>
 
     <section class="panel wide">
@@ -114,27 +119,69 @@ const $ = id => document.getElementById(id);
 const config = () => ({base: localStorage.v2mBase || "", token: localStorage.v2mToken || ""});
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, Number(n) || 0));
-function notice(text, target = "message") { $(target).textContent = text; setTimeout(() => { if ($(target)) $(target).textContent = ""; }, 5000); }
-function init() { $("apiBase").value = config().base; $("apiToken").value = config().token; refreshJobs(); }
-function saveConnection() { localStorage.v2mBase = $("apiBase").value.trim().replace(/\/$/, ""); localStorage.v2mToken = $("apiToken").value; notice("connection saved"); checkHealth(); refreshJobs(); }
+const noticeTimers = {};
+function setStatus(target, text, tone = "") {
+  const el = $(target); if (!el) return;
+  el.textContent = text; el.className = `status${tone ? ` ${tone}` : ""}`;
+}
+function notice(text, target = "message", tone = "error", persist = false) {
+  setStatus(target, text, tone); clearTimeout(noticeTimers[target]);
+  if (!persist) noticeTimers[target] = setTimeout(() => setStatus(target, ""), 8000);
+}
+function formConnection() {
+  return {base: $("apiBase").value.trim().replace(/\/$/, ""), token: $("apiToken").value.trim()};
+}
+function updateConnectionHint() {
+  const {base, token} = formConnection();
+  if (base && token) {
+    $("connectionHint").textContent = "Connection details entered. Click Check GPU to verify NVIDIA/CUDA before starting.";
+    $("connectionHint").style.borderLeftColor = "var(--accent2)";
+  } else {
+    $("connectionHint").textContent = "Start the GPU worker on the computer with the NVIDIA GPU, then enter its URL and API token here before starting a production.";
+    $("connectionHint").style.borderLeftColor = "var(--warn)";
+  }
+}
+function init() {
+  $("apiBase").value = config().base; $("apiToken").value = config().token; updateConnectionHint();
+  if (config().base && config().token) { checkHealth(); refreshJobs(); }
+}
+function saveConnection() {
+  const {base, token} = formConnection();
+  if (!base || !token) {
+    notice("Enter both the GPU worker URL and the API token first.", "health", "error", true);
+    updateConnectionHint(); return;
+  }
+  localStorage.v2mBase = base; localStorage.v2mToken = token; updateConnectionHint();
+  notice("Connection saved. Checking GPU…", "message", "pending", true); checkHealth(); refreshJobs();
+}
 
 async function api(path, options = {}) {
   const {base, token} = config();
-  if (!base) throw new Error("save the GPU worker URL first");
+  if (!base || !token) throw new Error("Connect the GPU worker first: enter its URL and API token, then click Save connection.");
   const headers = {"Authorization": "Bearer " + token, ...(options.headers || {})};
   if (!(options.body instanceof FormData) && options.body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(base + path, {...options, headers});
+  let response;
+  try { response = await fetch(base + path, {...options, headers}); }
+  catch (e) { throw new Error(`Cannot reach the GPU worker at ${base}. Start run_local.sh and use an HTTPS tunnel when this page is HTTPS.`); }
+  if (response.status === 401 || response.status === 403) throw new Error("The GPU worker rejected the API token. Copy the token printed by run_local.sh and save the connection again.");
   if (!response.ok) throw new Error((await response.text()) || `${response.status} ${response.statusText}`);
   return response;
 }
 async function checkHealth() {
+  setStatus("health", "Checking GPU worker…", "pending");
   try { const data = await (await api("/health")).json(); const h = data.hardware || {};
-    $("health").textContent = h.cuda ? `Ready · ${h.device} · ${h.vram_gb || "?"} GB VRAM` : `Worker online · accelerator not detected (${h.device || "unknown"})`;
-  } catch (e) { $("health").textContent = e.message; }
+    setStatus("health", h.cuda ? `Ready · ${h.device} · ${h.vram_gb || "?"} GB VRAM` : `Worker online · accelerator not detected (${h.device || "unknown"})`, h.cuda ? "ok" : "pending");
+  } catch (e) { setStatus("health", e.message, "error"); }
 }
 async function createJob() {
+  const button = $("startProduction");
+  if (!config().base || !config().token) {
+    notice("Connect the GPU worker first: enter its URL and API token in the left panel, then click Save connection.", "message", "error", true);
+    setStatus("health", "GPU worker is not connected.", "error"); updateConnectionHint(); return;
+  }
   try {
     const vibe = $("vibe").value.trim(); if (!vibe) throw new Error("describe the vibe first");
+    button.disabled = true; button.textContent = "Queueing…"; notice("Submitting production to the GPU worker…", "message", "pending", true);
     const form = new FormData();
     form.append("vibe", vibe); form.append("instruments", $("instruments").value.trim());
     form.append("target_minutes", $("targetMinutes").value); form.append("device", $("device").value);
@@ -142,8 +189,9 @@ async function createJob() {
     if ($("tracks").value) form.append("tracks", $("tracks").value);
     if ($("image").files[0]) form.append("image", $("image").files[0]);
     await api("/jobs", {method:"POST", body:form});
-    notice("production queued"); $("vibe").value = ""; $("image").value = ""; refreshJobs();
-  } catch (e) { notice(e.message); }
+    notice("Production queued. Watch its progress in the queue below.", "message", "ok", true); $("vibe").value = ""; $("image").value = ""; refreshJobs();
+  } catch (e) { notice(e.message, "message", "error", true); }
+  finally { button.disabled = false; button.textContent = "Start production"; }
 }
 async function loadBlob(path) { return URL.createObjectURL(await (await api(path)).blob()); }
 async function listen(id, el) { try { const audio = el.querySelector("audio"); audio.src = await loadBlob(`/jobs/${id}/audio`); audio.style.display = "block"; await audio.play(); } catch(e) { notice(e.message); } }
@@ -178,11 +226,13 @@ function renderJob(j) {
 async function refreshJobs() {
   if ([...document.querySelectorAll("audio,video")].some(media => !media.paused && !media.ended)) return;
   if (document.activeElement && document.activeElement.classList.contains("meta")) return;
+  if (!config().base || !config().token) { $("jobs").innerHTML = '<div class="empty">Enter the GPU worker URL and API token above, then click Save connection.</div>'; return; }
   try { const jobs = await (await api("/jobs")).json(); $("jobs").innerHTML = "";
     if (!jobs.length) { $("jobs").innerHTML = '<div class="empty">No productions yet. Start with a vibe.</div>'; return; }
     jobs.forEach(j => $("jobs").appendChild(renderJob(j)));
   } catch(e) { $("jobs").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
+["apiBase", "apiToken"].forEach(id => $(id).addEventListener("input", updateConnectionHint));
 init(); setInterval(refreshJobs, 6000);
 </script>
 </body>
