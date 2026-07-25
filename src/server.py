@@ -1,9 +1,7 @@
-"""Durable single-GPU worker API for the web control panel.
+"""Local API and job queue for the vibe2music web application.
 
-The Cloudflare UI is only the control surface. This process owns generation,
-ffmpeg, job state, previews, and YouTube credentials on the local NVIDIA box.
-Only one generation job is executed at a time so two browser clicks cannot
-oversubscribe the GPU.
+Only one job runs at a time so repeated browser clicks cannot exhaust the paid
+provider's concurrency allowance.
 """
 
 from __future__ import annotations
@@ -12,6 +10,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -22,6 +21,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 try:
@@ -57,7 +57,7 @@ WORKER_STARTED = False
 
 def auth(request: Request) -> None:
     if not API_TOKEN:
-        raise HTTPException(503, "API_TOKEN is not configured on the GPU worker")
+        raise HTTPException(503, "API_TOKEN is not configured")
     if request.headers.get("authorization") != f"Bearer {API_TOKEN}":
         raise HTTPException(401, "bad token")
 
@@ -67,6 +67,8 @@ class JobIn(BaseModel):
     instruments: str = Field(default="", max_length=500)
     tracks: int | None = Field(default=None, ge=3, le=24)
     target_minutes: float = Field(default=45.0, ge=1.0, le=180.0)
+    engine: Literal["ace-step", "atlas"] = "atlas"
+    atlas_model: str = Field(default="suno/chirp-fenix", min_length=2, max_length=64)
     device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     device_id: int = Field(default=0, ge=0, le=15)
 
@@ -112,7 +114,7 @@ def _append_log(job_dir: Path, text: str) -> None:
 
 
 def _hardware() -> dict[str, Any]:
-    result: dict[str, Any] = {"engine": "ace-step", "cuda": False, "device": "unknown"}
+    result: dict[str, Any] = {"engines": ["ace-step", "atlas"], "cuda": False, "device": "unknown", "atlas_configured": bool(os.environ.get("ATLASCLOUD_API_KEY"))}
     try:
         import torch
 
@@ -142,7 +144,7 @@ def _recover_jobs() -> None:
         state = _state(job_dir)
         status = str(state.get("status", ""))
         if status == "queued" or status.startswith("running:"):
-            _set_state(job_dir, status="queued", current_step="waiting_for_gpu")
+            _set_state(job_dir, status="queued", current_step="waiting")
             _queue_job(job_dir.name)
 
 
@@ -218,6 +220,7 @@ def _run_job(job_id: str) -> None:
         "instruments": state.get("instruments", ""),
         "tracks": state.get("tracks"),
         "target_minutes": state.get("target_minutes", 45),
+        "engine": "atlas",
         "device": "auto",
         "device_id": 0,
     }
@@ -237,13 +240,15 @@ def _run_job(job_id: str) -> None:
     if not _run_step(job_dir, job_id, "planning", 0, total, "prompt_compiler.py", *compile_args):
         return
 
-    generate_args = [
-        str(prompts), "--out", str(job_dir), "--device", spec.device,
-        "--device-id", str(spec.device_id),
-    ]
-    if spec.device == "cpu":
-        generate_args.append("--allow-cpu")
-    if not _run_step(job_dir, job_id, "generation", 1, total, "generate.py", *generate_args):
+    if spec.engine == "atlas":
+        generate_script = "generate_atlas.py"
+        generate_args = [str(prompts), "--out", str(job_dir), "--model", spec.atlas_model]
+    else:
+        generate_script = "generate.py"
+        generate_args = [str(prompts), "--out", str(job_dir), "--device", spec.device, "--device-id", str(spec.device_id)]
+        if spec.device == "cpu":
+            generate_args.append("--allow-cpu")
+    if not _run_step(job_dir, job_id, "generation", 1, total, generate_script, *generate_args):
         return
 
     plan = json.loads(prompts.read_text(encoding="utf-8"))
@@ -268,18 +273,24 @@ def _run_job(job_id: str) -> None:
         ):
             return
     _set_state(job_dir, cover_path=str(cover_path))
-    if not _run_step(job_dir, job_id, "render", 6, total, "render.py", str(set_dir), "--image", str(cover_path)):
-        return
+    video_path: Path | None = None
+    if shutil.which("ffmpeg"):
+        if not _run_step(job_dir, job_id, "render", 6, total, "render.py", str(set_dir), "--image", str(cover_path)):
+            return
+        video_path = set_dir / "video.mp4"
+    else:
+        _append_log(job_dir, "\nFFmpeg not found: audio and cover are ready; MP4 rendering was skipped.\n")
 
     _set_state(
         job_dir, status="ready_for_review", current_step=None, progress=100,
         artifacts={
             "audio": str(set_dir / "preview.mp3" if (set_dir / "preview.mp3").exists() else set_dir / "mix.wav"),
             "master_audio": str(set_dir / "mix.wav"),
-            "video": str(set_dir / "video.mp4"),
+            "video": str(video_path) if video_path else None,
             "metadata": str(set_dir / "metadata.json"),
             "cover": str(cover_path),
         },
+        video_available=video_path is not None,
     )
 
 
@@ -292,6 +303,8 @@ async def _parse_job_request(request: Request) -> tuple[JobIn, UploadFile | None
             "instruments": str(form.get("instruments", "")),
             "tracks": form.get("tracks") or None,
             "target_minutes": form.get("target_minutes") or 45,
+            "engine": str(form.get("engine", "atlas")),
+            "atlas_model": str(form.get("atlas_model", "suno/chirp-fenix")),
             "device": str(form.get("device", "auto")),
             "device_id": form.get("device_id") or 0,
         }
@@ -328,6 +341,8 @@ async def _save_image(job_dir: Path, image: UploadFile | None) -> Path | None:
 def health(request: Request) -> dict[str, Any]:
     auth(request)
     return {"ok": True, "worker": WORKER_STARTED, "hardware": _hardware()}
+
+
 
 
 @app.post("/jobs")
@@ -387,7 +402,7 @@ def retry_job(job_id: str, request: Request) -> dict[str, Any]:
     state = _state(job_dir)
     if str(state.get("status", "")).startswith("running"):
         raise HTTPException(409, "job is still running")
-    _set_state(job_dir, status="queued", progress=0, error=None, current_step="waiting_for_gpu")
+    _set_state(job_dir, status="queued", progress=0, error=None, current_step="waiting")
     CANCEL_EVENTS[job_id] = threading.Event()
     _start_worker()
     _queue_job(job_id)
@@ -396,7 +411,10 @@ def retry_job(job_id: str, request: Request) -> dict[str, Any]:
 
 def _artifact(job_id: str, key: str, media_type: str, download: bool = False) -> FileResponse:
     state = _state(_job_path(job_id))
-    path = Path(state.get("artifacts", {}).get(key, ""))
+    raw_path = state.get("artifacts", {}).get(key)
+    if not raw_path:
+        raise HTTPException(404, f"{key} not ready")
+    path = Path(raw_path)
     if not path.is_file():
         raise HTTPException(404, f"{key} not ready")
     return FileResponse(path, media_type=media_type, filename=path.name if download else None)
@@ -430,6 +448,12 @@ def download_video(job_id: str, request: Request) -> FileResponse:
 def get_cover(job_id: str, request: Request) -> FileResponse:
     auth(request)
     return _artifact(job_id, "cover", "image/png")
+
+
+@app.get("/jobs/{job_id}/download/cover")
+def download_cover(job_id: str, request: Request) -> FileResponse:
+    auth(request)
+    return _artifact(job_id, "cover", "image/png", download=True)
 
 
 @app.get("/jobs/{job_id}/log")
@@ -490,3 +514,4 @@ def do_upload(job_id: str, request: Request, payload: UploadIn | None = None) ->
 
 
 _start_worker()
+app.mount("/", StaticFiles(directory=str(ROOT / "ui"), html=True), name="ui")
