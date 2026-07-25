@@ -60,9 +60,16 @@ def _request(url: str, token: str, payload: dict[str, Any] | None = None) -> dic
 
 def _wait(prediction_id: str, token: str, poll_seconds: float, timeout_seconds: float) -> list[str]:
     deadline = time.monotonic() + timeout_seconds
+    previous_status: str | None = None
+    last_update = 0.0
     while time.monotonic() < deadline:
         data = _request(f"{BASE_URL}/prediction/{prediction_id}", token).get("data") or {}
         status = str(data.get("status", "processing")).lower()
+        now = time.monotonic()
+        if status != previous_status or now - last_update >= 30:
+            print(f"    prediction {prediction_id}: {status}", flush=True)
+            previous_status = status
+            last_update = now
         if status in {"completed", "succeeded"}:
             outputs = [str(url) for url in data.get("outputs", []) if url]
             if outputs:
@@ -118,9 +125,13 @@ def generate_set(plan: dict[str, Any], out_root: Path, *, model: str = "suno/chi
         prediction_id = (submitted.get("data") or {}).get("id")
         if not prediction_id:
             raise AtlasAPIError("Atlas Cloud accepted the generation without returning a prediction id")
-        print(f"  Atlas {index}/{len(tracks)}: waiting for chirp-fenix")
+        print(
+            f"  Atlas {index}/{len(tracks)}: submitted prediction {prediction_id}",
+            flush=True,
+        )
         alternatives = _wait(str(prediction_id), token, poll_seconds, timeout_seconds)
         _download(alternatives[0], destination)
+        print(f"  Atlas {index}/{len(tracks)}: downloaded {destination.name}", flush=True)
         entries.append({"index": index, "file": str(destination.resolve()), "prediction_id": prediction_id,
                         "selected_alternative": 0, "alternatives": alternatives})
         partial = {"set_title": plan["set_title"], "mood_tags": plan.get("mood_tags", []),
