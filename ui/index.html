@@ -67,28 +67,13 @@
 <body>
 <main>
   <header>
-    <div><div class="eyebrow">local GPU production studio</div><h1>vibe2music</h1>
+    <div><div class="eyebrow">AI music production studio</div><h1>vibe2music</h1>
       <p>Turn one idea into a curated, exact-length instrumental video.</p></div>
     <div class="pill">45-minute album workflow</div>
   </header>
 
   <div class="grid">
-    <section class="panel">
-      <h2>Connect to the worker</h2>
-      <label for="apiBase">GPU worker URL</label>
-      <input id="apiBase" placeholder="http://127.0.0.1:8000 or your HTTPS tunnel">
-      <label for="apiToken">API token</label>
-      <input id="apiToken" type="password" placeholder="the token printed by run_local.sh">
-      <div class="row" style="margin-top:10px">
-        <button onclick="saveConnection()">Save connection</button>
-        <button class="secondary" onclick="checkHealth()">Check GPU</button>
-      </div>
-      <div id="health" class="status" style="margin-top:10px"></div>
-      <div id="connectionHint" class="notice">Start the GPU worker on the computer with the NVIDIA GPU, then enter its URL and API token here before starting a production.</div>
-      <div class="small">For a deployed HTTPS panel, expose the local API through an HTTPS tunnel. Never put an unprotected API on the public internet.</div>
-    </section>
-
-    <section class="panel">
+    <section class="panel wide">
       <h2>New production job</h2>
       <label for="vibe">Vibe / creative brief</label>
       <textarea id="vibe" placeholder="rainy Tokyo café at midnight, warm analog synths, focused and spacious"></textarea>
@@ -98,11 +83,7 @@
         <div><label for="targetMinutes">Target minutes</label><input id="targetMinutes" type="number" value="45" min="1" max="180" step="1"></div>
         <div><label for="tracks">Tracks <span class="small">(blank = automatic)</span></label><input id="tracks" type="number" placeholder="automatic" min="3" max="24"></div>
       </div>
-      <div class="split">
-        <div><label for="device">Generation device</label><select id="device"><option value="auto">Auto (NVIDIA → MPS → CPU)</option><option value="cuda">NVIDIA CUDA</option><option value="mps">Apple MPS</option><option value="cpu">CPU (very slow)</option></select></div>
-        <div><label for="deviceId">NVIDIA device ID</label><input id="deviceId" type="number" value="0" min="0" max="15"></div>
-      </div>
-      <label for="image">Optional cover image</label><input id="image" type="file" accept=".jpg,.jpeg,.png,.webp,image/*">
+      <label for="image">Optional cover image <span class="small">(leave blank to generate one automatically)</span></label><input id="image" type="file" accept=".jpg,.jpeg,.png,.webp,image/*">
       <div class="row" style="margin-top:12px"><button id="startProduction" onclick="createJob()">Start production</button><div id="message" class="status" role="status" aria-live="polite"></div></div>
     </section>
 
@@ -116,7 +97,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const config = () => ({base: localStorage.v2mBase || "", token: localStorage.v2mToken || ""});
+const config = () => ({base: location.origin, token: "vibe2music-local"});
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, Number(n) || 0));
 const noticeTimers = {};
@@ -128,64 +109,30 @@ function notice(text, target = "message", tone = "error", persist = false) {
   setStatus(target, text, tone); clearTimeout(noticeTimers[target]);
   if (!persist) noticeTimers[target] = setTimeout(() => setStatus(target, ""), 8000);
 }
-function formConnection() {
-  return {base: $("apiBase").value.trim().replace(/\/$/, ""), token: $("apiToken").value.trim()};
-}
-function updateConnectionHint() {
-  const {base, token} = formConnection();
-  if (base && token) {
-    $("connectionHint").textContent = "Connection details entered. Click Check GPU to verify NVIDIA/CUDA before starting.";
-    $("connectionHint").style.borderLeftColor = "var(--accent2)";
-  } else {
-    $("connectionHint").textContent = "Start the GPU worker on the computer with the NVIDIA GPU, then enter its URL and API token here before starting a production.";
-    $("connectionHint").style.borderLeftColor = "var(--warn)";
-  }
-}
 function init() {
-  $("apiBase").value = config().base; $("apiToken").value = config().token; updateConnectionHint();
-  if (config().base && config().token) { checkHealth(); refreshJobs(); }
-}
-function saveConnection() {
-  const {base, token} = formConnection();
-  if (!base || !token) {
-    notice("Enter both the GPU worker URL and the API token first.", "health", "error", true);
-    updateConnectionHint(); return;
-  }
-  localStorage.v2mBase = base; localStorage.v2mToken = token; updateConnectionHint();
-  notice("Connection saved. Checking GPU…", "message", "pending", true); checkHealth(); refreshJobs();
+  refreshJobs();
 }
 
 async function api(path, options = {}) {
   const {base, token} = config();
-  if (!base || !token) throw new Error("Connect the GPU worker first: enter its URL and API token, then click Save connection.");
   const headers = {"Authorization": "Bearer " + token, ...(options.headers || {})};
   if (!(options.body instanceof FormData) && options.body !== undefined) headers["Content-Type"] = "application/json";
   let response;
   try { response = await fetch(base + path, {...options, headers}); }
-  catch (e) { throw new Error(`Cannot reach the GPU worker at ${base}. Start run_local.sh and use an HTTPS tunnel when this page is HTTPS.`); }
-  if (response.status === 401 || response.status === 403) throw new Error("The GPU worker rejected the API token. Copy the token printed by run_local.sh and save the connection again.");
+  catch (e) { throw new Error("The local app stopped responding. Restart it with: python app.py"); }
+  if (response.status === 401 || response.status === 403) throw new Error("The local app rejected the request. Restart it with: python app.py");
   if (!response.ok) throw new Error((await response.text()) || `${response.status} ${response.statusText}`);
   return response;
 }
-async function checkHealth() {
-  setStatus("health", "Checking GPU worker…", "pending");
-  try { const data = await (await api("/health")).json(); const h = data.hardware || {};
-    setStatus("health", h.cuda ? `Ready · ${h.device} · ${h.vram_gb || "?"} GB VRAM` : `Worker online · accelerator not detected (${h.device || "unknown"})`, h.cuda ? "ok" : "pending");
-  } catch (e) { setStatus("health", e.message, "error"); }
-}
 async function createJob() {
   const button = $("startProduction");
-  if (!config().base || !config().token) {
-    notice("Connect the GPU worker first: enter its URL and API token in the left panel, then click Save connection.", "message", "error", true);
-    setStatus("health", "GPU worker is not connected.", "error"); updateConnectionHint(); return;
-  }
   try {
     const vibe = $("vibe").value.trim(); if (!vibe) throw new Error("describe the vibe first");
-    button.disabled = true; button.textContent = "Queueing…"; notice("Submitting production to the GPU worker…", "message", "pending", true);
+    button.disabled = true; button.textContent = "Queueing…"; notice("Submitting production to the worker…", "message", "pending", true);
     const form = new FormData();
     form.append("vibe", vibe); form.append("instruments", $("instruments").value.trim());
-    form.append("target_minutes", $("targetMinutes").value); form.append("device", $("device").value);
-    form.append("device_id", $("deviceId").value);
+    form.append("target_minutes", $("targetMinutes").value); form.append("engine", "atlas"); form.append("atlas_model", "suno/chirp-fenix");
+    form.append("device", "auto"); form.append("device_id", "0");
     if ($("tracks").value) form.append("tracks", $("tracks").value);
     if ($("image").files[0]) form.append("image", $("image").files[0]);
     await api("/jobs", {method:"POST", body:form});
@@ -211,10 +158,12 @@ function renderJob(j) {
     <div class="progress"><i style="width:${clamp(j.progress,0,100)}%"></i></div><div class="status">${esc(j.current_step || j.error || (ready ? "Ready for review" : "Waiting"))}</div>
     <div class="actions">
       <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="listen('${j.id}',this.closest('.job'))">Listen</button>
-      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="watch('${j.id}',this.closest('.job'))">Preview video</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="downloadFile('${j.id}','audio','vibe2music-${j.id}.wav')">Download audio</button>
+      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="downloadFile('${j.id}','cover','vibe2music-${j.id}-cover.png')">Download cover</button>
+      <button class="secondary" ${j.video_available && (ready || status.startsWith("uploaded_")) ? "" : "disabled"} onclick="watch('${j.id}',this.closest('.job'))">Preview video</button>
       <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="loadMeta('${j.id}',this.closest('.job'))">Edit metadata</button>
       <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="saveMeta('${j.id}',this.closest('.job'))">Save metadata</button>
-      <button class="secondary" ${ready || status.startsWith("uploaded_") ? "" : "disabled"} onclick="downloadFile('${j.id}','video','vibe2music-${j.id}.mp4')">Download MP4</button>
+      <button class="secondary" ${j.video_available && (ready || status.startsWith("uploaded_")) ? "" : "disabled"} onclick="downloadFile('${j.id}','video','vibe2music-${j.id}.mp4')">Download MP4</button>
       <button class="secondary" onclick="showLog('${j.id}',this.closest('.job'))">Log</button>
       <button ${ready ? "" : "disabled"} onclick="uploadPrivate('${j.id}')">Upload private</button>
       <button class="danger" ${terminal ? "disabled" : ""} onclick="cancelJob('${j.id}')">Cancel</button>
@@ -226,13 +175,11 @@ function renderJob(j) {
 async function refreshJobs() {
   if ([...document.querySelectorAll("audio,video")].some(media => !media.paused && !media.ended)) return;
   if (document.activeElement && document.activeElement.classList.contains("meta")) return;
-  if (!config().base || !config().token) { $("jobs").innerHTML = '<div class="empty">Enter the GPU worker URL and API token above, then click Save connection.</div>'; return; }
   try { const jobs = await (await api("/jobs")).json(); $("jobs").innerHTML = "";
     if (!jobs.length) { $("jobs").innerHTML = '<div class="empty">No productions yet. Start with a vibe.</div>'; return; }
     jobs.forEach(j => $("jobs").appendChild(renderJob(j)));
   } catch(e) { $("jobs").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
-["apiBase", "apiToken"].forEach(id => $(id).addEventListener("input", updateConnectionHint));
 init(); setInterval(refreshJobs, 6000);
 </script>
 </body>
