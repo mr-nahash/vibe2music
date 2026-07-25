@@ -11,11 +11,8 @@ Pillow
 fastapi
 uvicorn[standard]
 python-multipart
+python-dotenv
 
 # YouTube upload
 google-api-python-client
 google-auth-oauthlib
-
-# Install the CUDA-enabled torch wheel and ACE-Step separately with
-# setup_local.sh or runpod/setup.sh. Keeping them out of this file avoids
-# silently installing a CPU-only build on a GPU machine.
