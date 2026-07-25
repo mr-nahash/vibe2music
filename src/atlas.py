@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
+
+import requests
 
 try:
     from .common import slugify
@@ -27,16 +27,32 @@ class AtlasAPIError(RuntimeError):
 
 
 def _request(url: str, token: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    raw = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = urllib.request.Request(url, data=raw, method="POST" if payload is not None else "GET",
-                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "vibe2music/1.0 (requests)",
+    }
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise AtlasAPIError(f"Atlas Cloud HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')[:600]}") from exc
-    except urllib.error.URLError as exc:
-        raise AtlasAPIError(f"Atlas Cloud network error: {exc.reason}") from exc
+        if payload is None:
+            response = requests.get(url, headers=headers, timeout=60)
+        else:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        body = response.json()
+    except requests.HTTPError as exc:
+        detail = response.text[:600].strip()
+        if response.status_code in {401, 403}:
+            raise AtlasAPIError(
+                f"Atlas Cloud rejected the request (HTTP {response.status_code}). "
+                "Check that ATLASCLOUD_API_KEY is a valid active API key with available credit. "
+                f"Provider response: {detail}"
+            ) from exc
+        raise AtlasAPIError(f"Atlas Cloud HTTP {response.status_code}: {detail}") from exc
+    except requests.RequestException as exc:
+        raise AtlasAPIError(f"Atlas Cloud network error: {exc}") from exc
+    except ValueError as exc:
+        raise AtlasAPIError(f"Atlas Cloud returned invalid JSON: {response.text[:600]}") from exc
     if body.get("code") not in (None, 200):
         raise AtlasAPIError(f"Atlas Cloud error {body.get('code')}: {body.get('msg', 'unknown error')}")
     return body
@@ -59,8 +75,18 @@ def _wait(prediction_id: str, token: str, poll_seconds: float, timeout_seconds: 
 
 
 def _download(url: str, destination: Path) -> None:
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "vibe2music/1.0"}), timeout=180) as response:
-        destination.write_bytes(response.read())
+    try:
+        with requests.get(
+            url, headers={"User-Agent": "vibe2music/1.0 (requests)"},
+            timeout=180, stream=True,
+        ) as response:
+            response.raise_for_status()
+            with destination.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+    except requests.RequestException as exc:
+        raise AtlasAPIError(f"could not download generated audio: {exc}") from exc
     if destination.stat().st_size < 1024:
         raise AtlasAPIError(f"downloaded audio is unexpectedly small: {destination}")
 
