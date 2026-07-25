@@ -183,7 +183,9 @@ def _run_step(job_dir: Path, job_id: str, label: str, index: int,
         return False
     _set_state(job_dir, status=f"running:{label}", current_step=label,
                progress=round(index / total * 100))
-    command = [sys.executable, str(HERE / script), *args]
+    # ``-u`` is essential on Windows: otherwise child output can remain buffered
+    # for the whole (potentially hour-long) Atlas generation step.
+    command = [sys.executable, "-u", str(HERE / script), *args]
     _append_log(job_dir, f"\n=== {label} ===\n$ {' '.join(command)}\n")
     process = subprocess.Popen(
         command, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
