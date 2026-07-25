@@ -31,6 +31,8 @@ def main() -> None:
     parser.add_argument("--tracks", type=int, default=None)
     parser.add_argument("--target-minutes", type=float, default=45.0)
     parser.add_argument("--out", default="output")
+    parser.add_argument("--engine", default=os.environ.get("V2M_ENGINE", "atlas"), choices=["ace-step", "atlas"])
+    parser.add_argument("--atlas-model", default=os.environ.get("ATLAS_MODEL", "suno/chirp-fenix"))
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
     parser.add_argument("--device-id", type=int, default=0)
     parser.add_argument("--checkpoint-path", default="")
@@ -59,19 +61,23 @@ def main() -> None:
     run("prompt_compiler.py", *compile_args)
 
     if args.dry_run:
-        run("generate.py", str(prompts), "--out", str(out_root), "--dry-run")
+        if args.engine == "atlas":
+            plan = json.loads(prompts.read_text(encoding="utf-8"))
+            print(f"Atlas Cloud dry run: {len(plan['tracks'])} Chirp-fenix generation(s), two alternatives each; no API request was made")
+        else:
+            run("generate.py", str(prompts), "--out", str(out_root), "--dry-run")
         print("\ndry run complete -- no GPU or LLM request was made")
         return
 
-    generate_args = [
-        str(prompts), "--out", str(out_root), "--device", args.device,
-        "--device-id", str(args.device_id),
-    ]
-    if args.checkpoint_path:
-        generate_args += ["--checkpoint-path", args.checkpoint_path]
-    if args.allow_cpu:
-        generate_args.append("--allow-cpu")
-    run("generate.py", *generate_args)
+    if args.engine == "atlas":
+        run("generate_atlas.py", str(prompts), "--out", str(out_root), "--model", args.atlas_model)
+    else:
+        generate_args = [str(prompts), "--out", str(out_root), "--device", args.device, "--device-id", str(args.device_id)]
+        if args.checkpoint_path:
+            generate_args += ["--checkpoint-path", args.checkpoint_path]
+        if args.allow_cpu:
+            generate_args.append("--allow-cpu")
+        run("generate.py", *generate_args)
 
     plan = json.loads(prompts.read_text(encoding="utf-8"))
     set_dir = out_root / slugify(plan["set_title"])
