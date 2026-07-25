@@ -12,6 +12,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 python-dotenv
+requests
 
 # YouTube upload
 google-api-python-client
