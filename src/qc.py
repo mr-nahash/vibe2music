@@ -51,7 +51,7 @@ def check_loudness(y: np.ndarray, sr: int, low: float = -20.0, high: float = -9.
     return {"name": "loudness", "passed": bool(passed), "details": f"{lufs:.1f} LUFS"}
 
 
-def check_duration(y: np.ndarray, sr: int, min_sec: float = 60, max_sec: float = 300) -> dict:
+def check_duration(y: np.ndarray, sr: int, min_sec: float = 60, max_sec: float = 600) -> dict:
     duration = len(y) / sr
     return {
         "name": "duration",
